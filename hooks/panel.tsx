@@ -854,7 +854,7 @@ export const register: Register = (on) => {
         </Box>
       );
     }
-    const { Box, Text, Button, Input, Select, Code } = $.ui.resolve(e);
+    const { Box, Text, Button, Input, Code } = $.ui.resolve(e);
     const narrow = e.props.bodyColumns < NARROW_PANE_COLUMNS; // 狭いときは操作盤だけ（タブも隠す）
     const [storedTab, busy] = await Promise.all([readTab($), isBusy($)]);
     const tab: PanelTab = narrow ? "panel" : storedTab;
@@ -1216,15 +1216,18 @@ export const register: Register = (on) => {
               <Text dimColor>{t("read.noRecent")}</Text>
             </Box>
           ) : busy ? null : (
-            <Box marginTop={1}>
-              <Select
-                key="yomu:file"
-                label={t("read.pick")}
-                options={recent.map((f) => ({ value: f, label: rel(f, cwd) }))}
-                onSelect={(value) => {
-                  void sendRead($, value);
-                }}
-              />
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold>{t("read.pick")}</Text>
+              {recent.map((f, i) => (
+                <Button
+                  plain
+                  key={`yomu:pick:${i}`}
+                  label={`> ${rel(f, cwd)}`}
+                  onPress={() => {
+                    void sendRead($, f);
+                  }}
+                />
+              ))}
             </Box>
           )}
           {reads.length > 0 ? (
@@ -1381,16 +1384,18 @@ export const register: Register = (on) => {
             <Text dimColor>{t("restore.none")}</Text>
           </Box>
         ) : busy ? null : (
-          <Box marginTop={1}>
-            <Select
-              key="modosu:pick"
-              label={t("restore.pick")}
-              options={restore.candidates.map((c) => ({ value: c.id, label: c.label }))}
-              value={restore.selected?.id}
-              onSelect={(value) => {
-                void previewRestore($, value);
-              }}
-            />
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold>{t("restore.pick")}</Text>
+            {restore.candidates.map((c) => (
+              <Button
+                plain
+                key={`modosu:pick:${c.id}`}
+                label={`${restore.selected?.id === c.id ? "[x]" : "[ ]"} ${c.label}`}
+                onPress={() => {
+                  void previewRestore($, c.id);
+                }}
+              />
+            ))}
           </Box>
         )}
         {restore.selected !== null ? (

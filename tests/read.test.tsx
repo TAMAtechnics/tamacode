@@ -12,11 +12,12 @@ test("直近に Read / Edit したファイルが選べて、選ぶと説明の�
 
   expect((await $.command.run({ command: "yomu", args: "", ...RUN })).text).toBe("「読む」タブを開きました。ファイルを選んでください");
   let ui = await mountPanel($);
-  const select = await ui.find({ type: "Select" });
-  expect(select).toBeDefined();
-  expect((select!.props as any).options.map((o: any) => o.label)).toEqual(["src/api.ts", "README.md"]);
+  // 一覧は押すだけのボタン（Select はキーボードでフォーカスしないと選べないので使わない）
+  const picks = (await ui.findAll({ type: "Button" })).filter((b: any) => String(b.props?.key ?? b.key ?? "").startsWith("yomu:pick:"));
+  expect(picks.map((b: any) => String(b.props.label))).toEqual(["> src/api.ts", "> README.md"]);
+  expect(await ui.find({ type: "Select" })).toBeUndefined();
 
-  await ui.select({ key: "yomu:file", value: "/proj/README.md" });
+  await ui.press({ key: "yomu:pick:1" });
   expect(rec.prompts).toEqual(["README.md を、プログラムを知らない人向けに段落ごとに日本語で説明して。各段落は『ここは何をしている』『どこから呼ばれる』『壊すとどうなる』の3点。専門用語は括弧で一言。"]);
   await ui.unmount();
 
@@ -36,5 +37,5 @@ test("まだ何も読んでいなければ、その旨を出す", async ($, on) 
   await $.command.run({ command: "yomu", args: "", ...RUN });
   const ui = await mountPanel($);
   expect((await texts(ui)).some((t) => t.includes("まだ最近のファイルがありません"))).toBe(true);
-  expect(await ui.find({ type: "Select" })).toBeUndefined();
+  expect((await ui.findAll({ type: "Button" })).some((b: any) => String(b.props?.key ?? b.key ?? "").startsWith("yomu:pick:"))).toBe(false);
 });
