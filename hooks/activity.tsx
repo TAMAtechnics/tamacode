@@ -19,8 +19,9 @@
 // ツールの実行は一切止めない（見せるだけ）。
 
 import type { EngineInterface, Register } from "claude-code";
-import type { TamacodeLogEntry, TamacodeNotice, TamacodeNow, TamacodeSummary, TamacodeTerms, TamacodeWander } from "../types/tamacode";
+import type { TamacodeLogEntry, TamacodeNotice, TamacodeNow, TamacodePermission, TamacodeSummary, TamacodeTerms, TamacodeWander } from "../types/tamacode";
 import { t } from "./locale";
+import { parsePermission, permissionGuess, permissionLines, permissionPrompt } from "./permission";
 import { buildTerms, pickErrorLines } from "./terms";
 
 // $.state の参照。plugin と key はリテラルでないと validate が読めない。
@@ -30,6 +31,7 @@ const WANDER = { plugin: "tamacode", key: "wander" } as const;
 const TERMS = { plugin: "tamacode", key: "terms" } as const;
 const SUMMARY = { plugin: "tamacode", key: "summary" } as const;
 const NOTICE = { plugin: "tamacode", key: "notice" } as const;
+const PERMISSION = { plugin: "tamacode", key: "permission" } as const;
 const PANE_TAB = { plugin: "tamacode", key: "paneTab" } as const;
 
 const PANE_ID = "tama";
@@ -440,6 +442,48 @@ async function readSummary($: Dollar): Promise<TamacodeSummary | null> {
   return v && typeof v === "object" && typeof v.turnId === "string" ? v : null;
 }
 
+// ---------- 【5】許可プロンプトの翻訳 ----------
+
+async function readPermission($: Dollar): Promise<TamacodePermission | null> {
+  const got = await $.state.get(PERMISSION);
+  const v = got.value as TamacodePermission | null | undefined;
+  return v && typeof v === "object" && Array.isArray(v.lines) ? v : null;
+}
+
+// 規則で即答して帯に出し、裏で軽いモデルに言い直してもらう
+async function explainPermission($: Dollar, tool: string, input: Record<string, unknown>, at: number): Promise<void> {
+  const guess = permissionGuess(tool, input, cwd);
+  await $.state.set(PERMISSION, { at, tool, lines: permissionLines(guess), level: guess.level, isLoading: true } satisfies TamacodePermission);
+  const prompt = permissionPrompt(tool, input, cwd, guess);
+  $.clock.after(0, () => {
+    void (async () => {
+      let refined = null as ReturnType<typeof parsePermission>;
+      try {
+        const r = await $.model.complete({
+          model: SUMMARY_MODEL,
+          system: "あなたは、プログラムを知らない人に向けて、コンピュータの操作の中身と危なさをやさしい日本語で説明する係です。",
+          prompt,
+          effort: "low",
+          maxTokens: 300,
+          timeoutMs: 15000,
+        });
+        if (r.isAnswered) refined = parsePermission(r.text);
+        else $.ui.log(`許可の言い直しなし: ${r.reason}`, { to: "debug" });
+      } catch (err) {
+        $.ui.log(`許可の言い直しに失敗: ${String(err)}`, { to: "debug" });
+      }
+      const cur = await readPermission($);
+      if (cur === null || cur.at !== at) return; // もう別の許可に移っている
+      // 危険度は規則の判定より下げない（モデルが甘く見ても「高」は「高」のまま）
+      const rank = { low: 0, mid: 1, high: 2 } as const;
+      const level = refined !== null && rank[refined.level] > rank[guess.level] ? refined.level : guess.level;
+      const lines = refined !== null ? permissionLines({ ...refined, level }) : cur.lines;
+      await $.state.set(PERMISSION, { ...cur, lines, level, isLoading: false });
+      $.ui.invalidate("ui.render");
+    })();
+  });
+}
+
 // ---------- 迷走検知 ----------
 
 // 「同じエラー」とみなすための署名。行番号や時刻のような数字は潰し、先頭の数行だけ見る。
@@ -594,7 +638,7 @@ export const register: Register = (on) => {
       });
     }
     const at = await $.clock.now();
-    await Promise.all([$.state.set(WANDER, null), $.state.set(NOW, null), $.state.set(NOTICE, null), forgetOutputs($, at)]);
+    await Promise.all([$.state.set(WANDER, null), $.state.set(NOW, null), $.state.set(NOTICE, null), $.state.set(PERMISSION, null), forgetOutputs($, at)]);
     return next(e);
   });
 
@@ -659,8 +703,11 @@ export const register: Register = (on) => {
   // C 返事待ち: 許可ダイアログが出た
   on("classic.PermissionRequest", async ($, e, next) => {
     try {
-      const desc = describeTool(String(e.tool_name ?? ""), (e.tool_input ?? {}) as Record<string, unknown>, cwd);
-      await setNow($, { phase: "waiting", face: CAT.sleep, text: `${t("band.waitingPermission")}: ${desc.text}`, tool: e.tool_name, isLong: false }, { log: true });
+      const tool = String(e.tool_name ?? "");
+      const input = (e.tool_input ?? {}) as Record<string, unknown>;
+      const desc = describeTool(tool, input, cwd);
+      const now = await setNow($, { phase: "waiting", face: CAT.sleep, text: `${t("band.waitingPermission")}: ${desc.text}`, tool, isLong: false }, { log: true });
+      await explainPermission($, tool, input, now.at);
     } catch (err) {
       $.ui.log(`許可待ちの表示に失敗: ${String(err)}`, { to: "debug" });
     }
@@ -696,6 +743,7 @@ export const register: Register = (on) => {
     }
     const desc = describeTool(like.tool, like as unknown as Record<string, unknown>, cwd);
     const at = await $.clock.now();
+    await $.state.set(PERMISSION, null); // 許可が下りた（または別の道具に移った）ので翻訳は消す
     if (desc.text !== "") {
       await setNow($, { phase: desc.isWaiting ? "waiting" : "running", face: desc.face, text: desc.text, tool: like.tool, isLong: desc.isLong }, { log: true });
     }
@@ -738,11 +786,14 @@ export const register: Register = (on) => {
 
   // 入力欄の上の帯: 今やってること＋待ってていいか（1 行、上書き。あなたの番なら黄色）＋ 迷走の注意
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
-    const [now, wGot, nGot, clock] = await Promise.all([readNow($), $.state.get(WANDER), $.state.get(NOTICE), $.clock.now()]);
+    const [now, wGot, nGot, perm, clock] = await Promise.all([readNow($), $.state.get(WANDER), $.state.get(NOTICE), readPermission($), $.clock.now()]);
     const shown = e.props.isWorking && now !== null && now.text !== "" ? judge(now, clock) : null;
     const w = (wGot.value as TamacodeWander | null | undefined) ?? null;
     const notice = (nGot.value as TamacodeNotice | null | undefined) ?? null;
     if (e.props.hasSurvey || (shown === null && w === null && notice === null)) return next(e);
+    // 許可待ちのときだけ、4 行の翻訳を黄色い行の下に出す。危険度が高ければ怒り顔
+    const permShown = shown !== null && shown.isYourTurn && perm !== null ? perm : null;
+    const mainLine = permShown !== null && permShown.level === "high" ? shown!.line.replace(CAT.sleep, CAT.danger) : shown?.line;
 
     const { Box, Text, Button } = $.ui.resolve(e);
     return (
@@ -757,8 +808,23 @@ export const register: Register = (on) => {
         {shown !== null ? (
           <Box>
             <Text color={shown.isYourTurn ? "yellow" : "cyan"} bold={shown.isYourTurn} wrap="truncate-end">
-              {shown.line}
+              {mainLine}
             </Text>
+          </Box>
+        ) : null}
+        {permShown !== null ? (
+          <Box flexDirection="column" paddingLeft={2}>
+            {permShown.lines.map((l) => (
+              <Text color={permShown.level === "high" && l.startsWith(t("permission.label.level")) ? "red" : undefined} wrap="truncate-end">
+                {l}
+              </Text>
+            ))}
+            {permShown.level === "high" ? (
+              <Text color="red" bold>
+                {CAT.danger} {t("permission.highHint")}
+              </Text>
+            ) : null}
+            {permShown.isLoading ? <Text dimColor>{t("permission.loading")}</Text> : null}
           </Box>
         ) : null}
         {w !== null ? (

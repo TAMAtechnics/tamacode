@@ -133,6 +133,20 @@ export type TamacodeBackup = {
   at: number;
 };
 
+/** 許可プロンプトの翻訳（帯の黄色い行の下に出す 4 行） */
+export type TamacodePermission = {
+  /** 出た時刻（エポックミリ秒） */
+  at: number;
+  /** 許可を求めている道具 */
+  tool: string;
+  /** 何をするか／消えて困るもの／危険度／おすすめ（ラベル付き 4 行） */
+  lines: string[];
+  /** 危険度 */
+  level: "low" | "mid" | "high";
+  /** モデルの言い直しを待っているか */
+  isLoading: boolean;
+};
+
 /** /log ペインに並べる1行 */
 export type TamacodeLogEntry = {
   /** 最後にこの行を出した時刻（エポックミリ秒） */
@@ -160,6 +174,8 @@ declare module 'claude-code' {
       summary: TamacodeSummary | null;
       /** 帯に出す知らせ。無ければ null */
       notice: TamacodeNotice | null;
+      /** 許可プロンプトの翻訳。出ていなければ null */
+      permission: TamacodePermission | null;
       /** 自動バックアップの一覧。新しい順、最大 100 件 */
       backups: TamacodeBackup[];
       /** 迷走検知。何も無ければ null */
