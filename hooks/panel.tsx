@@ -859,11 +859,11 @@ export const register: Register = (on) => {
     const [storedTab, busy] = await Promise.all([readTab($), isBusy($)]);
     const tab: PanelTab = narrow ? "panel" : storedTab;
 
+    // タブは幅に合わせて折り返す（1 行に収まらないと文字が重なって見えるため、各タブを 1 つの箱にして flexWrap）
     const tabs = narrow ? null : (
-      <Box>
-        {TABS.map(([id, key], i) => (
+      <Box flexWrap="wrap" columnGap={1}>
+        {TABS.map(([id, key]) => (
           <Box>
-            {i > 0 ? <Text dimColor>　</Text> : null}
             <Button
               plain
               key={`ptab:${id}`}
