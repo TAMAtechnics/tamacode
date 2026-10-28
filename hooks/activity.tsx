@@ -19,7 +19,7 @@
 // ツールの実行は一切止めない（見せるだけ）。
 
 import type { EngineInterface, Register } from "claude-code";
-import type { TamacodeErrorInfo, TamacodeLogEntry, TamacodeNotice, TamacodeNow, TamacodePermission, TamacodeRead, TamacodeSummary, TamacodeTerms, TamacodeWander } from "../types/tamacode";
+import type { TamacodeErrorInfo, TamacodeFinding, TamacodeLogEntry, TamacodeNotice, TamacodeNow, TamacodePermission, TamacodeRead, TamacodeSummary, TamacodeTerms, TamacodeWander } from "../types/tamacode";
 import { errorGuess, errorLines, errorPrompt, looksLikeError, parseErrorLines, errorHeadline as errorHeadlineLong } from "./errors";
 import { t } from "./locale";
 import { parsePermission, permissionGuess, permissionLines, permissionPrompt } from "./permission";
@@ -39,6 +39,10 @@ const RECENT = { plugin: "tamacode", key: "recentFiles" } as const;
 const READS = { plugin: "tamacode", key: "reads" } as const;
 const READ_PENDING = { plugin: "tamacode", key: "readPending" } as const;
 const END_PENDING = { plugin: "tamacode", key: "endPending" } as const;
+const WATCH_BLOCK = { plugin: "tamacode", key: "watchBlock" } as const;
+const WATCH_WARNINGS = { plugin: "tamacode", key: "watchWarnings" } as const;
+const WATCH_ALLOW = { plugin: "tamacode", key: "watchAllow" } as const;
+const PENDING_PROMPT = { plugin: "tamacode", key: "pendingPrompt" } as const;
 const RECENT_LIMIT = 10;
 const READS_LIMIT = 20;
 const PANE_TAB = { plugin: "tamacode", key: "paneTab" } as const;
@@ -493,6 +497,20 @@ async function explainPermission($: Dollar, tool: string, input: Record<string, 
   });
 }
 
+// ---------- 見張りのボタンから Claude に頼む ----------
+
+// 作業中なら turn.complete で送る。終わっていれば今すぐ送る
+async function queuePrompt($: Dollar, text: string): Promise<void> {
+  if (isTurnRunning) {
+    await $.state.set(PENDING_PROMPT, text);
+    await $.state.set(NOTICE, { face: CAT.pause, text: t("watch.queued"), at: await $.clock.now() } satisfies TamacodeNotice);
+    return;
+  }
+  $.clock.after(0, () => {
+    void $.prompt.submit({ text }).catch((err) => $.ui.log(`送信に失敗: ${String(err)}`, { to: "debug" }));
+  });
+}
+
 // ---------- 迷走検知 ----------
 
 // 「同じエラー」とみなすための署名。行番号や時刻のような数字は潰し、先頭の数行だけ見る。
@@ -700,7 +718,7 @@ export const register: Register = (on) => {
       });
     }
     const at = await $.clock.now();
-    await Promise.all([$.state.set(WANDER, null), $.state.set(NOW, null), $.state.set(NOTICE, null), $.state.set(PERMISSION, null), $.state.set(ERROR_INFO, null), $.state.set(BUSY, true), forgetOutputs($, at)]);
+    await Promise.all([$.state.set(WANDER, null), $.state.set(NOW, null), $.state.set(NOTICE, null), $.state.set(PERMISSION, null), $.state.set(ERROR_INFO, null), $.state.set(BUSY, true), $.state.set(WATCH_BLOCK, null), $.state.set(WATCH_WARNINGS, []), forgetOutputs($, at)]);
     return next(e);
   });
 
@@ -734,6 +752,19 @@ export const register: Register = (on) => {
         if (pending) await $.state.set(READ_PENDING, null);
       } catch (err) {
         $.ui.log(`「読む」の記録に失敗: ${String(err)}`, { to: "debug" });
+      }
+      // 見張りのボタンで予約した文があれば、作業が終わった今送る
+      try {
+        const pending = (await $.state.get(PENDING_PROMPT)).value;
+        if (typeof pending === "string" && pending !== "") {
+          await $.state.set(PENDING_PROMPT, null);
+          const text = pending;
+          $.clock.after(0, () => {
+            void $.prompt.submit({ text }).catch((err) => $.ui.log(`予約した文の送信に失敗: ${String(err)}`, { to: "debug" }));
+          });
+        }
+      } catch (err) {
+        $.ui.log(`予約した文の確認に失敗: ${String(err)}`, { to: "debug" });
       }
       // 【8】おわり: 作業日誌の返事が終わったら帯を「今日はここまで」に
       try {
@@ -900,12 +931,33 @@ export const register: Register = (on) => {
 
   // 入力欄の上の帯: 今やってること＋待ってていいか（1 行、上書き。あなたの番なら黄色）＋ 迷走の注意
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
-    const [now, wGot, nGot, perm, errInfo, clock] = await Promise.all([readNow($), $.state.get(WANDER), $.state.get(NOTICE), readPermission($), readErrorInfo($), $.clock.now()]);
+    const [now, wGot, nGot, perm, errInfo, bGot, wsGot, clock] = await Promise.all([readNow($), $.state.get(WANDER), $.state.get(NOTICE), readPermission($), readErrorInfo($), $.state.get(WATCH_BLOCK), $.state.get(WATCH_WARNINGS), $.clock.now()]);
     const shown = e.props.isWorking && now !== null && now.text !== "" ? judge(now, clock) : null;
     const w = (wGot.value as TamacodeWander | null | undefined) ?? null;
     const notice = (nGot.value as TamacodeNotice | null | undefined) ?? null;
     const errShown = e.props.isWorking ? errInfo : null;
-    if (e.props.hasSurvey || (shown === null && w === null && notice === null && errShown === null)) return next(e);
+    const block = (bGot.value as TamacodeFinding | null | undefined) ?? null;
+    const warnings = Array.isArray(wsGot.value) ? (wsGot.value as TamacodeFinding[]) : [];
+    if (e.props.hasSurvey || (shown === null && w === null && notice === null && errShown === null && block === null && warnings.length === 0)) return next(e);
+
+    // 見張りのボタン: 直す（Claude に修正を頼む。作業中なら終わってから送る）／このまま通す（1 回だけ通し、やり直しを頼む）／やめる
+    const actOnBlock = (action: "fix" | "allow" | "cancel") => {
+      void (async () => {
+        if (block === null) return;
+        try {
+          if (action === "fix" && block.fixPrompt !== null) await queuePrompt($, block.fixPrompt);
+          if (action === "allow") {
+            const cur = (await $.state.get(WATCH_ALLOW)).value;
+            const list = Array.isArray(cur) ? (cur as string[]) : [];
+            await $.state.set(WATCH_ALLOW, Array.from(new Set([...list, block.sig])));
+            await queuePrompt($, t("watch.retryPrompt"));
+          }
+        } catch (err) {
+          $.ui.log(`見張りのボタンに失敗: ${String(err)}`, { to: "debug" });
+        }
+        await $.state.set(WATCH_BLOCK, null);
+      })();
+    };
     // 許可待ちのときだけ、4 行の翻訳を黄色い行の下に出す。危険度が高ければ怒り顔
     const permShown = shown !== null && shown.isYourTurn && perm !== null ? perm : null;
     const mainLine = permShown !== null && permShown.level === "high" ? shown!.line.replace(CAT.sleep, CAT.danger) : shown?.line;
@@ -913,6 +965,28 @@ export const register: Register = (on) => {
     const { Box, Text, Button } = $.ui.resolve(e);
     return (
       <Box flexDirection="column" paddingX={1}>
+        {block !== null ? (
+          <Box flexDirection="column">
+            <Text color="red" bold wrap="wrap">
+              {CAT.stopped} {t("watch.blocked.heading")}: {block.text}
+            </Text>
+            {block.hint !== null ? <Text wrap="wrap">　{block.hint}</Text> : null}
+            <Box>
+              <Text>　</Text>
+              {block.options.map((o) => (
+                <Box>
+                  <Button key={`watch:${o.key}`} label={o.label} variant={o.action === "fix" ? "primary" : undefined} onPress={() => actOnBlock(o.action)} />
+                  <Text>　</Text>
+                </Box>
+              ))}
+            </Box>
+          </Box>
+        ) : null}
+        {warnings.map((wn) => (
+          <Text color="red" wrap="truncate-end">
+            {CAT.danger} {wn.text}{wn.hint === null ? "" : `　${wn.hint}`}
+          </Text>
+        ))}
         {notice !== null ? (
           <Box>
             <Text color={notice.face === CAT.danger ? "red" : "green"} wrap="truncate-end">

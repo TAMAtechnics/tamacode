@@ -10,7 +10,8 @@
 //   - locale.ts    : 文言（locales/ja.json）の取り出し口 t()
 //   - permission.ts: 【5】許可プロンプトの翻訳（純粋な部分。フックは activity.tsx）
 //   - errors.ts    : 【4】エラー翻訳（純粋な部分。フックは activity.tsx）
-//   - panel.tsx    : 操作盤ペイン（/panel）と【1】おねがい【3】読む【6】戻す【8】おわり【2】もっと簡単に・確認して
+//   - panel.tsx    : 操作盤ペイン（/panel）と【1】おねがい【3】読む【6】戻す【8】おわり【2】もっと簡単に・確認して・点検（/tenken）
+//   - watch.ts     : 見張りの判定（純粋。rules/security.json）。道具の前後に当てるのは safety.tsx
 
 import type { Register } from "claude-code";
 import { register as registerChanges } from "./changes";

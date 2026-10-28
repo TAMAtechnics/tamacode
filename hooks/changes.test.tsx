@@ -65,20 +65,21 @@ const mountPane = async ($: Engine) => {
   return $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "Pane", requestId: "tama", props: PANE_PROPS });
 };
 
-test("Edit を記録して、時刻・ファイル名・要約・行数が出る", async ($, on) => {
+test("Edit を記録して、時刻・ファイル名・要約・行数が出る（20 行以上の変更は要約つき）", async ($, on) => {
   const clock = setup(on);
-  await $.tool.call({ tool: "Edit", file_path: "/proj/src/api.ts", old_string: "const b = 2;", new_string: "const b = 20;" });
+  const big = "const b = 20;" + "\nconst x = 1;".repeat(20);
+  await $.tool.call({ tool: "Edit", file_path: "/proj/src/api.ts", old_string: "const b = 2;", new_string: big });
   await clock.settle();
 
   const ui = await mountPane($);
   const rows = await rowsOf(ui);
   expect(rows).toHaveLength(1);
-  expect(rows[0]!.text).toMatch(/^▸ \d\d:\d\d  api\.ts  \+1行 −1行$/);
+  expect(rows[0]!.text).toMatch(/^▸ \d\d:\d\d  api\.ts  \+21行 −1行$/);
   expect(await ui.find({ type: "Text", text: "数字をひとつ直しました。画面に出る値が変わります。" })).toBeDefined();
   expect(await ui.find({ type: "Code" })).toBeUndefined();
 });
 
-test("要約が失敗しても、ファイル名と行数だけで止まらない", async ($, on) => {
+test("要約が失敗しても、ファイル名と行数だけで止まらない。20 行未満の変更は最初から要約を頼まない", async ($, on) => {
   const clock = setup(on, { summary: "fail" });
   await $.tool.call({ tool: "Edit", file_path: "/proj/src/api.ts", old_string: "const b = 2;", new_string: "const b = 20;" });
   await clock.settle();
@@ -94,14 +95,14 @@ test("要約が失敗しても、ファイル名と行数だけで止まらな�
 
 test("壊れると困る所（.env）には危ない操作の猫と注意書きが付く", async ($, on) => {
   const clock = setup(on, { file: null, summary: "設定を書きました。動き方が変わります。" });
-  await $.tool.call({ tool: "Write", file_path: "/proj/.env", content: "KEY=1\n" });
+  await $.tool.call({ tool: "Write", file_path: "/proj/.env", content: Array.from({ length: 20 }, (_, i) => `KEY${i}=1`).join("\n") + "\n" });
   await clock.settle();
 
   const ui = await mountPane($);
   const rows = await rowsOf(ui);
   expect(rows).toHaveLength(1);
   expect(rows[0]!.text.startsWith("(=｀･q･´=)ﾉ ")).toBe(true);
-  expect(rows[0]!.text).toMatch(/\.env  \+1行 −0行$/);
+  expect(rows[0]!.text).toMatch(/\.env  \+20行 −0行$/);
   const note = await ui.find({ type: "Text", text: /※壊れると困る所です。不安なら戻してと言ってください$/ });
   expect(note).toBeDefined();
   expect(note!.text.startsWith("設定を書きました。動き方が変わります。")).toBe(true);

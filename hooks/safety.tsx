@@ -1,4 +1,4 @@
-// 【7】危険操作の前に自動バックアップ
+// 【7】危険操作の前に自動バックアップ ＋ 見張り（止める／警告。判定は watch.ts）
 //
 // Edit / Write / MultiEdit / NotebookEdit / Bash が動く前に、対象が
 // 「削除・データベース・認証・支払い・.env・rm・git push --force・migration」に当たるか判定する。
@@ -10,10 +10,11 @@
 // 控えの一覧は backups state（と $.store）に残し、/戻す（【6】）が使う。
 
 import type { EngineInterface, Register } from "claude-code";
-import type { TamacodeBackup, TamacodeNotice } from "../types/tamacode";
+import type { TamacodeBackup, TamacodeFinding, TamacodeNotice, TamacodeWatchStats } from "../types/tamacode";
 import { CAT, rel, short } from "./activity";
 import { RISK_PATH_RULES, RISK_TEXT_RULES } from "./changes";
 import { t } from "./locale";
+import { countHighVulns, evaluateBash, evaluateWrite, isInstallCommand, weekStart, type Finding } from "./watch";
 
 const NOTICE = { plugin: "tamacode", key: "notice" } as const;
 const BACKUPS = { plugin: "tamacode", key: "backups" } as const;
@@ -228,29 +229,154 @@ export async function takeBackup($: Dollar, target: Target): Promise<TamacodeBac
   }
 }
 
+// ---------- 見張り（watch.ts の判定を道具の前後に当てる） ----------
+
+const WATCH_BLOCK = { plugin: "tamacode", key: "watchBlock" } as const;
+const WATCH_WARNINGS = { plugin: "tamacode", key: "watchWarnings" } as const;
+const WATCH_SEEN = { plugin: "tamacode", key: "watchSeen" } as const;
+const WATCH_ALLOW = { plugin: "tamacode", key: "watchAllow" } as const;
+const WATCH_STATS = { plugin: "tamacode", key: "watchStats" } as const;
+const STORE_SEEN = "watchSeen";
+const STORE_STATS = "watchStats";
+const WARNINGS_LIMIT = 10;
+
+async function readSeen($: Dollar): Promise<string[]> {
+  const got = await $.state.get(WATCH_SEEN);
+  if (Array.isArray(got.value)) return got.value as string[];
+  try {
+    const saved = await $.store.get(STORE_SEEN);
+    return Array.isArray(saved) ? (saved as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function addSeen($: Dollar, sigs: string[]): Promise<void> {
+  const list = Array.from(new Set([...(await readSeen($)), ...sigs])).slice(-500);
+  await $.state.set(WATCH_SEEN, list);
+  try {
+    await $.store.set(STORE_SEEN, list);
+  } catch (err) {
+    $.ui.log(`見張りの記録の保存に失敗: ${String(err)}`, { to: "debug" });
+  }
+}
+
+async function readStats($: Dollar, now: number): Promise<TamacodeWatchStats> {
+  const got = await $.state.get(WATCH_STATS);
+  let v = got.value as TamacodeWatchStats | null | undefined;
+  if (!v || typeof v !== "object") {
+    try {
+      v = (await $.store.get(STORE_STATS)) as TamacodeWatchStats | undefined;
+    } catch {
+      v = undefined;
+    }
+  }
+  const ws = weekStart(now);
+  if (!v || typeof v !== "object" || v.weekStart !== ws) return { weekStart: ws, blocked: 0, warned: 0 };
+  return v;
+}
+
+async function bumpStats($: Dollar, kind: "blocked" | "warned", n: number, now: number): Promise<void> {
+  const cur = await readStats($, now);
+  const next = { ...cur, [kind]: cur[kind] + n };
+  await $.state.set(WATCH_STATS, next);
+  try {
+    await $.store.set(STORE_STATS, next);
+  } catch (err) {
+    $.ui.log(`見張りの回数の保存に失敗: ${String(err)}`, { to: "debug" });
+  }
+}
+
+async function pushWarnings($: Dollar, warns: Finding[], at: number): Promise<void> {
+  const got = await $.state.get(WATCH_WARNINGS);
+  const cur = Array.isArray(got.value) ? (got.value as TamacodeFinding[]) : [];
+  await $.state.set(WATCH_WARNINGS, [...warns.map((w) => ({ ...w, at })), ...cur].slice(0, WARNINGS_LIMIT));
+}
+
+// install の後に npm audit を回し、high 以上があれば警告
+async function auditAfterInstall($: Dollar, base: string, at: number): Promise<void> {
+  try {
+    const r = await $.process.run(["npm", "audit", "--json"], { cwd: base, timeoutMs: 60000 });
+    const n = countHighVulns(r.stdout);
+    if (n === null || n === 0) return;
+    const f: Finding = { rule: "audit", kind: "warn", sig: `audit:${weekStart(at)}:${n}`, file: null, text: t("watch.audit.text", { n }), hint: t("watch.audit.hint"), fixPrompt: t("watch.audit.fix"), options: [] };
+    const seen = await readSeen($);
+    if (seen.includes(f.sig)) return;
+    await pushWarnings($, [f], at);
+    await bumpStats($, "warned", 1, at);
+    await addSeen($, [f.sig]);
+  } catch (err) {
+    $.ui.log(`npm audit に失敗: ${String(err)}`, { to: "debug" });
+  }
+}
+
 // ---------- 登録 ----------
 
 export const register: Register = (on) => {
   on("tool.call", { tool: ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"] }, async ($, e, next) => {
     const input = e as unknown as Record<string, unknown>;
     if (input.agentId !== undefined) return next(e);
+    const base = await getCwd($);
+    const at = await $.clock.now();
 
+    // 見張り（止める／警告）と、控えの対象かの判定
     let target: Target | null = null;
+    let findings: Finding[] = [];
+    const cmd = e.tool === "Bash" ? String(input.command ?? "") : "";
     if (e.tool === "Bash") {
-      const cmd = String(input.command ?? "");
+      findings = evaluateBash(cmd);
       const reasonKey = dangerOfBash(cmd);
       if (reasonKey !== null) target = { tool: e.tool, reasonKey, file: null, command: cmd };
     } else {
       const file = String(input.file_path ?? input.notebook_path ?? "");
       const texts: string[] = [];
+      const written: string[] = [];
       for (const k of ["old_string", "new_string", "content", "new_source"]) if (typeof input[k] === "string") texts.push(input[k] as string);
-      if (Array.isArray(input.edits)) for (const ed of input.edits as Array<Record<string, unknown>>) texts.push(String(ed.old_string ?? ""), String(ed.new_string ?? ""));
+      for (const k of ["new_string", "content", "new_source"]) if (typeof input[k] === "string") written.push(input[k] as string);
+      if (Array.isArray(input.edits)) {
+        for (const ed of input.edits as Array<Record<string, unknown>>) {
+          texts.push(String(ed.old_string ?? ""), String(ed.new_string ?? ""));
+          written.push(String(ed.new_string ?? ""));
+        }
+      }
+      findings = file === "" ? [] : evaluateWrite(file, written, base);
       const reasonKey = dangerOfFile(file, texts);
       if (reasonKey !== null) target = { tool: e.tool, reasonKey, file, command: null };
     }
-    if (target === null) return next(e);
 
-    await takeBackup($, target);
-    return next(e);
+    // 【1】止める（「このまま通す」が押してあれば 1 回だけ通す）
+    const allowGot = await $.state.get(WATCH_ALLOW);
+    const allow = Array.isArray(allowGot.value) ? (allowGot.value as string[]) : [];
+    const blocks = findings.filter((f) => f.kind === "block" && !allow.includes(f.sig));
+    if (blocks.length > 0) {
+      const b = blocks[0]!;
+      await $.state.set(WATCH_BLOCK, { ...b, at } satisfies TamacodeFinding);
+      await bumpStats($, "blocked", 1, at);
+      return { deny: `${b.text}${b.hint === null ? "" : ` ${b.hint}`}${t("watch.deny.suffix")}` };
+    }
+    const used = findings.filter((f) => allow.includes(f.sig)).map((f) => f.sig);
+    if (used.length > 0) await $.state.set(WATCH_ALLOW, allow.filter((s) => !used.includes(s)));
+
+    // 【2】警告（同じ箇所は 1 回だけ）。通すので念のため控えも取る
+    const seen = await readSeen($);
+    const warns = findings.filter((f) => f.kind === "warn" && !seen.includes(f.sig));
+    if (warns.length > 0) {
+      await pushWarnings($, warns, at);
+      await bumpStats($, "warned", warns.length, at);
+      await addSeen($, warns.map((w) => w.sig));
+      if (target === null) {
+        const file = e.tool === "Bash" ? null : String(input.file_path ?? input.notebook_path ?? "");
+        target = { tool: e.tool, reasonKey: "backup.reason.watch", file: file === "" ? null : file, command: e.tool === "Bash" ? cmd : null };
+      }
+    }
+
+    if (target !== null) await takeBackup($, target);
+    const result = await next(e);
+
+    // install の後は npm audit
+    if (e.tool === "Bash" && base !== null && isInstallCommand(cmd) && (result as { isError?: true }).isError !== true) {
+      await auditAfterInstall($, base, at);
+    }
+    return result;
   });
 };

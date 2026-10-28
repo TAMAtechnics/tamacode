@@ -200,6 +200,42 @@ export type TamacodeRestore = {
   isLoading: boolean;
 };
 
+/** 見張りの指摘 1 件 */
+export type TamacodeFinding = {
+  rule: string;
+  kind: "block" | "warn";
+  sig: string;
+  file: string | null;
+  text: string;
+  hint: string | null;
+  fixPrompt: string | null;
+  options: Array<{ key: string; label: string; action: "fix" | "allow" | "cancel" }>;
+  /** 出た時刻（エポックミリ秒） */
+  at: number;
+};
+
+/** 止めた回数・警告した回数（週ごと） */
+export type TamacodeWatchStats = {
+  /** 週の始まり（月曜 0:00）のエポックミリ秒 */
+  weekStart: number;
+  blocked: number;
+  warned: number;
+};
+
+/** 点検の結果 */
+export type TamacodeTenken = {
+  at: number;
+  isRunning: boolean;
+  /** 見たファイル数 */
+  files: number;
+  /** 赤・黄の指摘 */
+  items: TamacodeFinding[];
+  /** 緑（OK だった項目）の文 */
+  oks: string[];
+  /** git 管理下か */
+  isGit: boolean;
+};
+
 /** /log ペインに並べる1行 */
 export type TamacodeLogEntry = {
   /** 最後にこの行を出した時刻（エポックミリ秒） */
@@ -234,7 +270,7 @@ declare module 'claude-code' {
       /** Claude が作業中か（操作盤のボタンを無効にする） */
       isBusy: boolean;
       /** 操作盤ペインで開いているタブ */
-      panelTab: "panel" | "onegai" | "yomu" | "modosu";
+      panelTab: "panel" | "onegai" | "yomu" | "modosu" | "tenken";
       /** 直近に Read / Edit したファイル（絶対パス、新しい順、最大 10 件） */
       recentFiles: string[];
       /** 【3】保存した説明。新しい順、最大 20 件 */
@@ -253,6 +289,20 @@ declare module 'claude-code' {
       requests: TamacodeRequest[];
       /** 【6】戻すの候補と選択 */
       restore: TamacodeRestore;
+      /** 見張りが止めた操作（帯にボタン付きで出す）。無ければ null */
+      watchBlock: TamacodeFinding | null;
+      /** 見張りの警告（帯に赤で出す）。新しい順 */
+      watchWarnings: TamacodeFinding[];
+      /** もう出さない箇所（sig）。「大丈夫」や一度出した警告 */
+      watchSeen: string[];
+      /** 「このまま通す」で 1 回だけ通す箇所（sig） */
+      watchAllow: string[];
+      /** 止めた回数・警告した回数 */
+      watchStats: TamacodeWatchStats;
+      /** 点検の結果。まだなら null */
+      tenken: TamacodeTenken | null;
+      /** Claude の作業が終わってから送る文。無ければ null */
+      pendingPrompt: string | null;
       /** 自動バックアップの一覧。新しい順、最大 100 件 */
       backups: TamacodeBackup[];
       /** 迷走検知。何も無ければ null */

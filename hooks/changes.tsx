@@ -10,6 +10,7 @@
 
 import type { EngineInterface, Register } from "claude-code";
 import { LOCALE_FILE, USER_LOCALE_FILE, applyLocale, markLocaleLoaded } from "./locale";
+import { applyRules } from "./watch";
 
 type Change = {
   id: string;
@@ -40,6 +41,7 @@ const MAX_LCS_CELLS = 1500 * 1500; // これより大きい差分は LCS を諦�
 const CONTEXT_LINES = 3;
 const SUMMARY_MODEL = "haiku";
 const SUMMARY_DIFF_CHARS = 3000;
+const SUMMARY_MIN_LINES = 20; // これ未満の変更は軽いモデルを呼ばず「ファイル名＋±行数」だけ
 export const RISK_NOTE = "※壊れると困る所です。不安なら戻してと言ってください";
 export const RISK_FACE = "(=｀･q･´=)ﾉ"; // 危ない操作の猫（activity.tsx の CAT.danger と同じ顔）
 
@@ -361,6 +363,15 @@ async function loadLocale($: Dollar): Promise<void> {
     }
   }
   markLocaleLoaded();
+  // 見張りのルール（rules/security.json → ~/.claude/tamacode-rules.json）
+  for (const path of candidates.map((c) => c.replace(/locales\/ja\.json$/, "rules/security.json").replace(/tamacode-ja\.json$/, "tamacode-rules.json"))) {
+    try {
+      const n = applyRules(await $.fs.read(path));
+      if (n > 0) $.ui.log(`見張りのルールを読みました: ${path}（${n} 項目）`, { to: "debug" });
+    } catch {
+      // 無いのはふつう
+    }
+  }
 }
 
 // 起動時: 文言を読み、store から読み戻し、/changes と /log を登録
@@ -382,6 +393,7 @@ async function onSessionStart($: Dollar): Promise<void> {
     { name: "owari", description: "おわり（今日の作業日誌を書いてコミットし、次回の下書きを作る）" },
     { name: "kantan", description: "もっと簡単に（今の説明を小学生にも分かる言い方で言い直してもらう）" },
     { name: "kakunin", description: "確認して（ビルドとテストを回して合格か不合格かと原因を一言で）" },
+    { name: "tenken", description: "点検（秘密の鍵の直書き・誰でも見えるテーブル・本人確認の無い入口などを探す）" },
   ]) {
     try {
       await $.command.register(cmd);
@@ -444,9 +456,11 @@ export const register: Register = (on) => {
     await updateChanges($, (list) => [change, ...list]);
     // 要約は裏で。ツールの結果は待たせない。
     // このフックの dispatch が終わると途中の $ 呼び出しは打ち切られうるので、タイマーで別の dispatch に載せる。
-    $.clock.after(0, () => {
-      void summarize($, change);
-    });
+    if (change.added + change.removed >= SUMMARY_MIN_LINES) {
+      $.clock.after(0, () => {
+        void summarize($, change);
+      });
+    }
     return result;
   });
 

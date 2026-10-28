@@ -9,9 +9,10 @@
 // コマンド名は英数字しか使えない（Claude Code の決まり）ので、ローマ字にしてある。
 
 import type { EngineInterface, Register } from "claude-code";
-import type { TamacodeBackup, TamacodeNotice, TamacodeRead, TamacodeRequest, TamacodeRestore, TamacodeWizardDraft } from "../types/tamacode";
+import type { TamacodeBackup, TamacodeFinding, TamacodeNotice, TamacodeRead, TamacodeRequest, TamacodeRestore, TamacodeTenken, TamacodeWatchStats, TamacodeWizardDraft } from "../types/tamacode";
 import { CAT, isTurnRunningNow, rel, short } from "./activity";
 import { t } from "./locale";
+import { findSecrets, getRules, isExcludedPath, isScannableFile, scanFileText, weekStart, type Finding } from "./watch";
 
 export const PANEL_ID = "panel";
 
@@ -29,6 +30,11 @@ const REQUESTS = { plugin: "tamacode", key: "requests" } as const;
 const RESTORE = { plugin: "tamacode", key: "restore" } as const;
 const BACKUPS = { plugin: "tamacode", key: "backups" } as const;
 const READ_OPEN = { plugin: "tamacode", key: "readOpen" } as const;
+const TENKEN = { plugin: "tamacode", key: "tenken" } as const;
+const WATCH_SEEN = { plugin: "tamacode", key: "watchSeen" } as const;
+const WATCH_STATS = { plugin: "tamacode", key: "watchStats" } as const;
+const STORE_SEEN = "watchSeen";
+const STORE_STATS = "watchStats";
 
 const STORE_READS = "reads";
 const STORE_REQUESTS = "requests";
@@ -39,13 +45,14 @@ const GIT_LOG_LIMIT = 10;
 const SUMMARY_MODEL = "haiku";
 
 type Dollar = EngineInterface;
-type PanelTab = "panel" | "onegai" | "yomu" | "modosu";
+type PanelTab = "panel" | "onegai" | "yomu" | "modosu" | "tenken";
 
 const TABS: Array<[PanelTab, string]> = [
   ["panel", "panel.tab.panel"],
   ["onegai", "panel.tab.onegai"],
   ["yomu", "panel.tab.yomu"],
   ["modosu", "panel.tab.modosu"],
+  ["tenken", "panel.tab.tenken"],
 ];
 
 // ---------- 送る文（純粋） ----------
@@ -94,7 +101,7 @@ async function isBusy($: Dollar): Promise<boolean> {
 async function readTab($: Dollar): Promise<PanelTab> {
   const got = await $.state.get(PANEL_TAB);
   const v = got.value;
-  return v === "onegai" || v === "yomu" || v === "modosu" || v === "panel" ? v : "panel";
+  return v === "onegai" || v === "yomu" || v === "modosu" || v === "tenken" || v === "panel" ? v : "panel";
 }
 
 async function notify($: Dollar, face: string, text: string): Promise<void> {
@@ -208,6 +215,140 @@ async function sendRead($: Dollar, file: string): Promise<void> {
   const text = buildReadPrompt(rel(file, cwd));
   if (!(await send($, text, true))) return;
   await $.state.set(READ_PENDING, { file, at: await $.clock.now() });
+}
+
+// ---------- 【3'】点検（/tenken）: プロジェクト全体を見張りの規則で見る ----------
+
+async function readSeen($: Dollar): Promise<string[]> {
+  const got = await $.state.get(WATCH_SEEN);
+  if (Array.isArray(got.value)) return got.value as string[];
+  try {
+    const saved = await $.store.get(STORE_SEEN);
+    return Array.isArray(saved) ? (saved as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function markOk($: Dollar, sig: string): Promise<void> {
+  const list = Array.from(new Set([...(await readSeen($)), sig])).slice(-500);
+  await $.state.set(WATCH_SEEN, list);
+  try {
+    await $.store.set(STORE_SEEN, list);
+  } catch (err) {
+    $.ui.log(`「大丈夫」の保存に失敗: ${String(err)}`, { to: "debug" });
+  }
+  const cur = await readTenken($);
+  if (cur !== null) await $.state.set(TENKEN, { ...cur, items: cur.items.filter((i) => i.sig !== sig) });
+}
+
+async function readStats($: Dollar, now: number): Promise<TamacodeWatchStats> {
+  const got = await $.state.get(WATCH_STATS);
+  let v = got.value as TamacodeWatchStats | null | undefined;
+  if (!v || typeof v !== "object") {
+    try {
+      v = (await $.store.get(STORE_STATS)) as TamacodeWatchStats | undefined;
+    } catch {
+      v = undefined;
+    }
+  }
+  const ws = weekStart(now);
+  return v && typeof v === "object" && v.weekStart === ws ? v : { weekStart: ws, blocked: 0, warned: 0 };
+}
+
+async function readTenken($: Dollar): Promise<TamacodeTenken | null> {
+  const got = await $.state.get(TENKEN);
+  const v = got.value as TamacodeTenken | null | undefined;
+  return v && typeof v === "object" && Array.isArray(v.items) ? v : null;
+}
+
+// フォルダを歩いてテキストのファイルを集める（対象外と大きすぎる物は飛ばす）
+async function collectFiles($: Dollar, base: string): Promise<Array<{ path: string; size: number }>> {
+  const rules = getRules();
+  const out: Array<{ path: string; size: number }> = [];
+  const queue: string[] = [base];
+  while (queue.length > 0 && out.length < rules.scanMaxFiles) {
+    const dir = queue.shift()!;
+    let entries: Array<{ name: string; kind: string; size: number }> = [];
+    try {
+      entries = await $.fs.list(dir);
+    } catch {
+      continue;
+    }
+    for (const en of entries) {
+      const full = `${dir}/${en.name}`;
+      const relPath = full.slice(base.length + 1);
+      if (en.kind === "dir") {
+        if (en.name.startsWith(".") && en.name !== ".github") continue;
+        if (!isExcludedPath(relPath + "/")) queue.push(full);
+      } else if (en.kind === "file") {
+        if (isExcludedPath(relPath) || !isScannableFile(en.name) || en.size > rules.scanMaxBytes) continue;
+        out.push({ path: full, size: en.size });
+        if (out.length >= rules.scanMaxFiles) break;
+      }
+    }
+  }
+  return out;
+}
+
+async function runTenken($: Dollar): Promise<void> {
+  const at = await $.clock.now();
+  const base = await $.session.cwd().catch(() => null);
+  await $.state.set(TENKEN, { at, isRunning: true, files: 0, items: [], oks: [], isGit: false } satisfies TamacodeTenken);
+  if (base === null) return;
+  const seen = await readSeen($);
+  const items: Finding[] = [];
+  const oks: string[] = [];
+  let count = 0;
+
+  // ファイルを 1 つずつ
+  const files = await collectFiles($, base);
+  let hasSecret = false;
+  for (const f of files) {
+    let text: string;
+    try {
+      text = await $.fs.read(f.path);
+    } catch {
+      continue;
+    }
+    count++;
+    for (const found of scanFileText(f.path, text, base)) {
+      if (found.rule === "secret") hasSecret = true;
+      if (!seen.includes(found.sig)) items.push(found);
+    }
+    if (count % 50 === 0) {
+      await $.state.set(TENKEN, { at, isRunning: true, files: count, items: items.map((i) => ({ ...i, at })), oks, isGit: false });
+      $.ui.invalidate("ui.render");
+    }
+  }
+  if (!hasSecret) oks.push(t("tenken.ok.secrets"));
+
+  // .gitignore に .env
+  let gitignore = "";
+  try {
+    gitignore = await $.fs.read(`${base}/.gitignore`);
+  } catch {
+    gitignore = "";
+  }
+  if (gitignore.split(/\r?\n/).some((l) => /^\.env(\*|\.\*|$)/.test(l.trim()))) oks.push(t("tenken.ok.gitignore"));
+  else if (!seen.includes("gitignore:.env")) items.push({ rule: "gitignore", kind: "warn", sig: "gitignore:.env", file: ".gitignore", text: t("watch.gitignore.text"), hint: null, fixPrompt: t("watch.gitignore.fix"), options: [] });
+
+  // git の履歴に鍵が無いか（直近 200 コミットの差分）
+  let isGit = false;
+  try {
+    const r = await $.process.run(["git", "log", "-p", "--all", "-n", "200", "--no-color"], { cwd: base, timeoutMs: 60000 });
+    if (r.exitCode === 0) {
+      isGit = true;
+      const hits = findSecrets(r.stdout);
+      if (hits.length === 0) oks.push(t("tenken.ok.history"));
+      else if (!seen.includes("git-history")) items.push({ rule: "git-history", kind: "block", sig: "git-history", file: null, text: t("watch.history.text", { n: hits.length }), hint: t("watch.history.hint"), fixPrompt: t("watch.history.fix"), options: [] });
+    }
+  } catch (err) {
+    $.ui.log(`git log に失敗: ${String(err)}`, { to: "debug" });
+  }
+
+  await $.state.set(TENKEN, { at, isRunning: false, files: count, items: items.map((i) => ({ ...i, at })), oks, isGit } satisfies TamacodeTenken);
+  $.ui.invalidate("ui.render");
 }
 
 // ---------- 【6】戻す ----------
@@ -396,6 +537,15 @@ export const register: Register = (on) => {
     return { text: t("end.sent") };
   });
 
+  // 点検
+  on("command.run", { command: "tenken" }, async ($) => {
+    const r = await openPanel($, "tenken");
+    $.clock.after(0, () => {
+      void runTenken($);
+    });
+    return { text: r.isPlaced ? t("tenken.opened") : t("panel.waiting", { reason: r.reason ?? "" }) };
+  });
+
   // 確認して
   on("command.run", { command: "kakunin" }, async ($) => {
     return { text: (await send($, buildCheckPrompt())) ? t("check.sent") : t("panel.sendFailed", { error: "" }) };
@@ -460,6 +610,14 @@ export const register: Register = (on) => {
             void (async () => {
               if (await send($, buildEndPrompt(), true)) await $.state.set(END_PENDING, true);
             })();
+          },
+        ],
+        [
+          "act:tenken",
+          "tenken.btn",
+          () => {
+            void $.state.set(PANEL_TAB, "tenken");
+            void runTenken($);
           },
         ],
         ["act:kantan", "panel.btn.kantan", () => void send($, buildSimplePrompt(), true)],
@@ -622,6 +780,117 @@ export const register: Register = (on) => {
               ))}
             </Box>
           ) : null}
+        </Box>
+      );
+    }
+
+    // ---------- 点検 ----------
+    if (tab === "tenken") {
+      const now = await $.clock.now();
+      const [res, stats] = await Promise.all([readTenken($), readStats($, now)]);
+      const reds = res?.items.filter((i) => i.kind === "block") ?? [];
+      const yellows = res?.items.filter((i) => i.kind === "warn") ?? [];
+      const row = (i: TamacodeFinding, color: "red" | "yellow") => (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color={color} wrap="wrap">
+            {color === "red" ? CAT.stopped : CAT.danger} {i.text}
+          </Text>
+          {i.hint !== null ? <Text dimColor wrap="wrap">　{i.hint}</Text> : null}
+          <Box>
+            <Text>　</Text>
+            {!busy && i.fixPrompt !== null ? (
+              <Button
+                key={`tenken:fix:${i.sig}`}
+                variant="primary"
+                label={t("watch.btn.fixIt")}
+                onPress={() => {
+                  void send($, i.fixPrompt ?? "", true);
+                }}
+              />
+            ) : null}
+            <Text>　</Text>
+            <Button
+              key={`tenken:ok:${i.sig}`}
+              label={t("watch.btn.ok")}
+              onPress={() => {
+                void markOk($, i.sig);
+              }}
+            />
+          </Box>
+        </Box>
+      );
+      return (
+        <Box flexDirection="column" paddingX={1}>
+          {tabs}
+          <Box marginTop={1}>
+            <Text bold>
+              {CAT.read} {t("tenken.heading")}
+            </Text>
+          </Box>
+          <Text>{t("tenken.stats", { blocked: stats.blocked, warned: stats.warned })}</Text>
+          <Text dimColor>{t("tenken.hint")}</Text>
+          {busyNote}
+          {res === null ? (
+            <Box marginTop={1}>
+              <Button
+                key="tenken:run"
+                label={t("tenken.btn")}
+                onPress={() => {
+                  void runTenken($);
+                }}
+              />
+            </Box>
+          ) : res.isRunning ? (
+            <Box marginTop={1}>
+              <Text dimColor>{t("tenken.running", { n: res.files })}</Text>
+            </Box>
+          ) : (
+            <Box flexDirection="column">
+              {reds.length === 0 && yellows.length === 0 ? (
+                <Box marginTop={1}>
+                  <Text color="green" bold>
+                    {CAT.done} {t("tenken.allGreen")}
+                  </Text>
+                </Box>
+              ) : null}
+              {reds.length > 0 ? (
+                <Box marginTop={1}>
+                  <Text color="red" bold>
+                    {t("tenken.red")}（{reds.length}）
+                  </Text>
+                </Box>
+              ) : null}
+              {reds.map((i) => row(i, "red"))}
+              {yellows.length > 0 ? (
+                <Box marginTop={1}>
+                  <Text color="yellow" bold>
+                    {t("tenken.yellow")}（{yellows.length}）
+                  </Text>
+                </Box>
+              ) : null}
+              {yellows.map((i) => row(i, "yellow"))}
+              {res.oks.length > 0 ? (
+                <Box flexDirection="column" marginTop={1}>
+                  <Text color="green" bold>
+                    {t("tenken.green")}（{res.oks.length}）
+                  </Text>
+                  {res.oks.map((o) => (
+                    <Text color="green">　{o}</Text>
+                  ))}
+                </Box>
+              ) : null}
+              {!res.isGit ? <Text dimColor>{t("tenken.notGit")}</Text> : null}
+              <Box marginTop={1}>
+                <Button
+                  key="tenken:rerun"
+                  label={t("tenken.rerun")}
+                  onPress={() => {
+                    void runTenken($);
+                  }}
+                />
+              </Box>
+            </Box>
+          )}
         </Box>
       );
     }
