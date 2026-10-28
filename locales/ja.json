@@ -242,7 +242,7 @@
   "vibe.onWaiting": "雰囲気モード オン。HUD は待機中です（{reason}）。帯に進捗バーが付きます",
   "vibe.off": "雰囲気モード オフ。HUD を閉じました",
   "vibe.noLog": "(no calls yet)",
-  "boot.online": "TAMA SYSTEM ONLINE",
+  "boot.online": "TAMACODE SYSTEM ONLINE",
   "boot.lastTime": "前回の続き: {line}",
   "boot.noLastTime": "前回のメモ（docs/次回.md）はまだありません"
 }
