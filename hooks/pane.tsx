@@ -8,7 +8,9 @@
 
 import type { EngineInterface, Register } from "claude-code";
 import type { TamacodeChange, TamacodeLogEntry, TamacodeTerms } from "../types/tamacode";
-import { CAT } from "./activity";
+import { CAT, isTurnRunningNow } from "./activity";
+import { t } from "./locale";
+import { buildSimplePrompt } from "./panel";
 import { RISK_FACE, RISK_NOTE } from "./changes";
 import { USER_FILE, buildTerms, serializeUser, setUser, withKnown } from "./terms";
 
@@ -21,6 +23,8 @@ const TERMS_OPEN = { plugin: "tamacode", key: "termsOpen" } as const;
 const CHANGES = { plugin: "tamacode", key: "changes" } as const;
 const OPEN_ID = { plugin: "tamacode", key: "openId" } as const;
 const LOG = { plugin: "tamacode", key: "log" } as const;
+const BUSY = { plugin: "tamacode", key: "isBusy" } as const;
+const NOTICE = { plugin: "tamacode", key: "notice" } as const;
 
 const CHANGES_LIMIT = 50;
 const LOG_LIMIT = 200;
@@ -94,9 +98,10 @@ export const register: Register = (on) => {
 
     // ---------- 用語 ----------
     if (tab === "terms") {
-      const [cur, openGot] = await Promise.all([readTerms($), $.state.get(TERMS_OPEN)]);
+      const [cur, openGot, busyGot] = await Promise.all([readTerms($), $.state.get(TERMS_OPEN), $.state.get(BUSY)]);
       const found = cur?.found ?? [];
       const isOpen = openGot.value === true;
+      const isBusy = busyGot.value === true && isTurnRunningNow();
       return (
         <Box flexDirection="column" paddingX={1}>
           {tabs}
@@ -114,6 +119,25 @@ export const register: Register = (on) => {
             ) : null}
           </Box>
           <Text dimColor>語を押すと「知ってる」になり次から出ません。＊はツールの出力から、†は自分の辞書</Text>
+          <Box>
+            {isBusy ? (
+              <Text dimColor>{t("panel.btn.kantan")}（{t("panel.busy")}）</Text>
+            ) : (
+              <Button
+                key="terms:kantan"
+                label={t("panel.btn.kantan")}
+                onPress={() => {
+                  void (async () => {
+                    try {
+                      await $.prompt.submit({ text: buildSimplePrompt() });
+                    } catch (err) {
+                      await $.state.set(NOTICE, { face: CAT.error, text: t("panel.sendFailed", { error: String(err).slice(0, 60) }), at: await $.clock.now() });
+                    }
+                  })();
+                }}
+              />
+            )}
+          </Box>
           {cur === null ? (
             <Box marginTop={1}>
               <Text dimColor>{CAT.sleep} Claude の返事やツールのエラーが出ると、ここに専門用語が並びます。</Text>

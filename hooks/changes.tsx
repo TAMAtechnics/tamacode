@@ -375,6 +375,13 @@ async function onSessionStart($: Dollar): Promise<void> {
   for (const cmd of [
     { name: "changes", description: "変更履歴ペインを開く（やさしい日本語の要約つき）" },
     { name: "log", description: "やったことの履歴ペインを開く（帯に出た一言の履歴）" },
+    { name: "panel", description: "操作盤を開く（おねがい・読む・戻す・おわり・もっと簡単に・確認して）" },
+    { name: "onegai", description: "おねがいウィザード（何を・どこで・成功の条件 を埋めて頼む）" },
+    { name: "yomu", description: "読む（最近のファイルをプログラムを知らない人向けに説明してもらう）" },
+    { name: "modosu", description: "戻す（git の履歴や控えから選び、消えるものを見てから戻す）" },
+    { name: "owari", description: "おわり（今日の作業日誌を書いてコミットし、次回の下書きを作る）" },
+    { name: "kantan", description: "もっと簡単に（今の説明を小学生にも分かる言い方で言い直してもらう）" },
+    { name: "kakunin", description: "確認して（ビルドとテストを回して合格か不合格かと原因を一言で）" },
   ]) {
     try {
       await $.command.register(cmd);

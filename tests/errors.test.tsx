@@ -95,7 +95,7 @@ test("同じエラーが 3 回続くと「同じ所で詰まってます」に�
   for (let i = 0; i < 3; i++) await $.tool.call({ tool: "Bash", command: "npm test" });
   await clock.advance(0);
   const lines = await bandText($);
-  expect(lines.some((l) => l.includes("同じ所で詰まってます。目的を言い直すか /おねがい で整理を"))).toBe(true);
+  expect(lines.some((l) => l.includes("同じ所で詰まってます。目的を言い直すか /onegai（おねがい）で整理を"))).toBe(true);
   expect(lines.some((l) => l.startsWith("何が起きた:"))).toBe(false);
 });
 

@@ -163,6 +163,43 @@ export type TamacodeErrorInfo = {
   isLoading: boolean;
 };
 
+/** 【3】読む: 保存した説明 */
+export type TamacodeRead = {
+  /** 説明してもらったファイル（絶対パス） */
+  file: string;
+  /** Claude の返事（説明の本文） */
+  answer: string;
+  /** 頼んだ時刻（エポックミリ秒） */
+  at: number;
+};
+
+/** 【1】おねがいウィザードの入力 */
+export type TamacodeWizardDraft = {
+  what: string;
+  where: string;
+  success: string;
+};
+
+/** 【1】送った依頼（履歴。直近 5 件） */
+export type TamacodeRequest = TamacodeWizardDraft & {
+  /** 組み立てて送った文 */
+  text: string;
+  /** 送った時刻（エポックミリ秒） */
+  at: number;
+};
+
+/** 【6】戻すの候補と選択 */
+export type TamacodeRestore = {
+  /** commit: git の履歴 / backup: .tama-backup の控え */
+  candidates: Array<{ kind: "commit" | "backup"; id: string; label: string }>;
+  /** 選んだ物。無ければ null */
+  selected: { kind: "commit" | "backup"; id: string; label: string } | null;
+  /** 「ここに戻すと消えるもの」。調べる前は null */
+  lines: string[] | null;
+  /** 調べている最中か */
+  isLoading: boolean;
+};
+
 /** /log ペインに並べる1行 */
 export type TamacodeLogEntry = {
   /** 最後にこの行を出した時刻（エポックミリ秒） */
@@ -194,6 +231,28 @@ declare module 'claude-code' {
       permission: TamacodePermission | null;
       /** エラー翻訳。直近の道具がエラーでなければ null */
       errorInfo: TamacodeErrorInfo | null;
+      /** Claude が作業中か（操作盤のボタンを無効にする） */
+      isBusy: boolean;
+      /** 操作盤ペインで開いているタブ */
+      panelTab: "panel" | "onegai" | "yomu" | "modosu";
+      /** 直近に Read / Edit したファイル（絶対パス、新しい順、最大 10 件） */
+      recentFiles: string[];
+      /** 【3】保存した説明。新しい順、最大 20 件 */
+      reads: TamacodeRead[];
+      /** 【3】説明を頼んで返事待ちのファイル。無ければ null */
+      readPending: { file: string; at: number } | null;
+      /** 【3】開いている説明の at。閉じていれば null */
+      readOpen: number | null;
+      /** 【8】おわりを送って返事待ちか */
+      endPending: boolean;
+      /** 【1】入力途中の内容 */
+      wizardDraft: TamacodeWizardDraft;
+      /** 【1】埋まっていない欄 */
+      wizardError: string[];
+      /** 【1】送った依頼の履歴 */
+      requests: TamacodeRequest[];
+      /** 【6】戻すの候補と選択 */
+      restore: TamacodeRestore;
       /** 自動バックアップの一覧。新しい順、最大 100 件 */
       backups: TamacodeBackup[];
       /** 迷走検知。何も無ければ null */

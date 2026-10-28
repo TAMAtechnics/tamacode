@@ -19,7 +19,7 @@
 // ツールの実行は一切止めない（見せるだけ）。
 
 import type { EngineInterface, Register } from "claude-code";
-import type { TamacodeErrorInfo, TamacodeLogEntry, TamacodeNotice, TamacodeNow, TamacodePermission, TamacodeSummary, TamacodeTerms, TamacodeWander } from "../types/tamacode";
+import type { TamacodeErrorInfo, TamacodeLogEntry, TamacodeNotice, TamacodeNow, TamacodePermission, TamacodeRead, TamacodeSummary, TamacodeTerms, TamacodeWander } from "../types/tamacode";
 import { errorGuess, errorLines, errorPrompt, looksLikeError, parseErrorLines, errorHeadline as errorHeadlineLong } from "./errors";
 import { t } from "./locale";
 import { parsePermission, permissionGuess, permissionLines, permissionPrompt } from "./permission";
@@ -34,6 +34,13 @@ const SUMMARY = { plugin: "tamacode", key: "summary" } as const;
 const NOTICE = { plugin: "tamacode", key: "notice" } as const;
 const PERMISSION = { plugin: "tamacode", key: "permission" } as const;
 const ERROR_INFO = { plugin: "tamacode", key: "errorInfo" } as const;
+const BUSY = { plugin: "tamacode", key: "isBusy" } as const;
+const RECENT = { plugin: "tamacode", key: "recentFiles" } as const;
+const READS = { plugin: "tamacode", key: "reads" } as const;
+const READ_PENDING = { plugin: "tamacode", key: "readPending" } as const;
+const END_PENDING = { plugin: "tamacode", key: "endPending" } as const;
+const RECENT_LIMIT = 10;
+const READS_LIMIT = 20;
 const PANE_TAB = { plugin: "tamacode", key: "paneTab" } as const;
 
 const PANE_ID = "tama";
@@ -519,6 +526,8 @@ let errors = new Map<string, number>();
 let hasToasted = false;
 let cwd: string | null = null;
 let isTurnRunning = false;
+/** Claude が今まさに作業中か（このモジュールの中の値。state の isBusy と合わせて使う） */
+export const isTurnRunningNow = (): boolean => isTurnRunning;
 let lastPrompt = "";
 let ticker: { cancel: () => void } | null = null;
 let lastTokenWrite = 0; // Date.now() 基準（state を書く間隔の制御だけに使う）
@@ -691,7 +700,7 @@ export const register: Register = (on) => {
       });
     }
     const at = await $.clock.now();
-    await Promise.all([$.state.set(WANDER, null), $.state.set(NOW, null), $.state.set(NOTICE, null), $.state.set(PERMISSION, null), $.state.set(ERROR_INFO, null), forgetOutputs($, at)]);
+    await Promise.all([$.state.set(WANDER, null), $.state.set(NOW, null), $.state.set(NOTICE, null), $.state.set(PERMISSION, null), $.state.set(ERROR_INFO, null), $.state.set(BUSY, true), forgetOutputs($, at)]);
     return next(e);
   });
 
@@ -699,7 +708,42 @@ export const register: Register = (on) => {
   on("turn.complete", async ($, e, next) => {
     if (e.agentId === undefined) {
       isTurnRunning = false;
-      await $.state.set(NOW, null);
+      await Promise.all([$.state.set(NOW, null), $.state.set(BUSY, false)]);
+      // 【3】読む: 説明を頼んでいたら、返事を「読む」タブに残す
+      try {
+        const pending = (await $.state.get(READ_PENDING)).value as { file: string; at: number } | null | undefined;
+        if (pending && typeof pending === "object" && e.reason === "answer" && e.answer.trim() !== "") {
+          const got = await $.state.get(READS);
+          let list: TamacodeRead[] = Array.isArray(got.value) ? (got.value as TamacodeRead[]) : [];
+          if (!Array.isArray(got.value)) {
+            try {
+              const saved = await $.store.get("reads");
+              list = Array.isArray(saved) ? (saved as TamacodeRead[]) : [];
+            } catch {
+              list = [];
+            }
+          }
+          const updated = [{ file: pending.file, answer: e.answer, at: pending.at }, ...list].slice(0, READS_LIMIT);
+          await $.state.set(READS, updated);
+          try {
+            await $.store.set("reads", updated);
+          } catch (err) {
+            $.ui.log(`「読む」の保存に失敗: ${String(err)}`, { to: "debug" });
+          }
+        }
+        if (pending) await $.state.set(READ_PENDING, null);
+      } catch (err) {
+        $.ui.log(`「読む」の記録に失敗: ${String(err)}`, { to: "debug" });
+      }
+      // 【8】おわり: 作業日誌の返事が終わったら帯を「今日はここまで」に
+      try {
+        if ((await $.state.get(END_PENDING)).value === true) {
+          await $.state.set(END_PENDING, false);
+          if (e.reason === "answer") await $.state.set(NOTICE, { face: CAT.done, text: t("end.notice"), at: await $.clock.now() } satisfies TamacodeNotice);
+        }
+      } catch (err) {
+        $.ui.log(`「おわり」の知らせに失敗: ${String(err)}`, { to: "debug" });
+      }
       if (e.reason === "answer" && e.answer.trim().length >= SUMMARY_MIN_ANSWER) {
         const req = { turnId: e.turnId, durationMs: e.durationMs, prompt: lastPrompt, answer: e.answer };
         await $.state.set(SUMMARY, { turnId: e.turnId, durationMs: e.durationMs, at: await $.clock.now(), lines: null, isLoading: true } satisfies TamacodeSummary);
@@ -801,6 +845,16 @@ export const register: Register = (on) => {
       await setNow($, { phase: desc.isWaiting ? "waiting" : "running", face: desc.face, text: desc.text, tool: like.tool, isLong: desc.isLong }, { log: true });
     }
     for (const f of desc.readFiles) await countRead($, f);
+    // 【3】読む: 直近に触ったファイルを覚える
+    if (["Read", "Edit", "Write", "MultiEdit", "NotebookEdit"].includes(like.tool)) {
+      const input = like as unknown as Record<string, unknown>;
+      const file = String(input.file_path ?? input.notebook_path ?? "");
+      if (file !== "") {
+        const got = await $.state.get(RECENT);
+        const list = Array.isArray(got.value) ? (got.value as string[]) : [];
+        await $.state.set(RECENT, [file, ...list.filter((f) => f !== file)].slice(0, RECENT_LIMIT));
+      }
+    }
 
     const result = await next(e);
     const r = result as ToolResultLike;
