@@ -156,7 +156,7 @@ test("エラーで終わった道具はエラーの猫と見出しを出す。�
   await $.turn.start({ text: "テストして", turnId: "t1" });
 
   await bash($, "npm test");
-  expect(await bandText($, WORKING)).toEqual([`${CAT.error} エラーが出ました: Error: Cannot find module './config'　最後の動き 0秒前`]);
+  expect((await bandText($, WORKING))[0]).toBe(`${CAT.error} エラーが出ました: Error: Cannot find module './config'　最後の動き 0秒前`);
 
   await $.tool.call({ tool: "Grep", pattern: "x" } as any);
   expect(await bandText($, WORKING)).toEqual([`${CAT.stopped} 止めました: 許可されていません　最後の動き 0秒前`]);

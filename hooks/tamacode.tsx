@@ -9,6 +9,7 @@
 //   - safety.tsx   : 【7】危険操作の前の自動バックアップ（.tama-backup/）
 //   - locale.ts    : 文言（locales/ja.json）の取り出し口 t()
 //   - permission.ts: 【5】許可プロンプトの翻訳（純粋な部分。フックは activity.tsx）
+//   - errors.ts    : 【4】エラー翻訳（純粋な部分。フックは activity.tsx）
 
 import type { Register } from "claude-code";
 import { register as registerChanges } from "./changes";

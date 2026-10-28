@@ -19,7 +19,8 @@
 // ツールの実行は一切止めない（見せるだけ）。
 
 import type { EngineInterface, Register } from "claude-code";
-import type { TamacodeLogEntry, TamacodeNotice, TamacodeNow, TamacodePermission, TamacodeSummary, TamacodeTerms, TamacodeWander } from "../types/tamacode";
+import type { TamacodeErrorInfo, TamacodeLogEntry, TamacodeNotice, TamacodeNow, TamacodePermission, TamacodeSummary, TamacodeTerms, TamacodeWander } from "../types/tamacode";
+import { errorGuess, errorLines, errorPrompt, looksLikeError, parseErrorLines, errorHeadline as errorHeadlineLong } from "./errors";
 import { t } from "./locale";
 import { parsePermission, permissionGuess, permissionLines, permissionPrompt } from "./permission";
 import { buildTerms, pickErrorLines } from "./terms";
@@ -32,6 +33,7 @@ const TERMS = { plugin: "tamacode", key: "terms" } as const;
 const SUMMARY = { plugin: "tamacode", key: "summary" } as const;
 const NOTICE = { plugin: "tamacode", key: "notice" } as const;
 const PERMISSION = { plugin: "tamacode", key: "permission" } as const;
+const ERROR_INFO = { plugin: "tamacode", key: "errorInfo" } as const;
 const PANE_TAB = { plugin: "tamacode", key: "paneTab" } as const;
 
 const PANE_ID = "tama";
@@ -473,7 +475,7 @@ async function explainPermission($: Dollar, tool: string, input: Record<string, 
         $.ui.log(`許可の言い直しに失敗: ${String(err)}`, { to: "debug" });
       }
       const cur = await readPermission($);
-      if (cur === null || cur.at !== at) return; // もう別の許可に移っている
+      if (cur === null || cur.at !== at || !cur.isLoading) return; // もう別の許可に移っている
       // 危険度は規則の判定より下げない（モデルが甘く見ても「高」は「高」のまま）
       const rank = { low: 0, mid: 1, high: 2 } as const;
       const level = refined !== null && rank[refined.level] > rank[guess.level] ? refined.level : guess.level;
@@ -544,17 +546,68 @@ type ToolResultLike = { isError?: true; deny?: string; text?: string; result?: u
 const resultText = (result: ToolResultLike): string =>
   typeof result.text === "string" ? result.text : typeof result.result === "string" ? result.result : "";
 
-async function countError($: Dollar, result: ToolResultLike): Promise<void> {
-  if (result.isError !== true) return;
+// エラーなら同じエラーの回数を数えて返す（エラーでなければ 0）
+async function countError($: Dollar, result: ToolResultLike): Promise<number> {
   const text = resultText(result);
+  if (result.isError !== true && !looksLikeError(text)) return 0;
   const sig = errorSignature(text);
-  if (sig === "") return;
+  if (sig === "") return 0;
   const n = (errors.get(sig) ?? 0) + 1;
   errors.set(sig, n);
   if (n >= ERROR_LIMIT) {
     const head = errorHeadline(text);
     await flag($, { kind: "error", detail: `同じエラーが ${n} 回続いています${head === "" ? "" : `: ${head}`}`, count: n, at: await $.clock.now() });
   }
+  return n;
+}
+
+// ---------- 【4】エラー翻訳 ----------
+
+async function readErrorInfo($: Dollar): Promise<TamacodeErrorInfo | null> {
+  const got = await $.state.get(ERROR_INFO);
+  const v = got.value as TamacodeErrorInfo | null | undefined;
+  return v && typeof v === "object" && Array.isArray(v.lines) ? v : null;
+}
+
+// 規則で即答して帯に出し、裏で軽いモデルに 3 行で言い直してもらう。同じエラーが 3 回続いたら「詰まってます」
+async function explainError($: Dollar, text: string, tool: string, sameCount: number, at: number): Promise<void> {
+  if (sameCount >= ERROR_LIMIT) {
+    await $.state.set(ERROR_INFO, { at, tool, lines: [t("error.stuck")], mode: "stuck", sameCount, isLoading: false } satisfies TamacodeErrorInfo);
+    return;
+  }
+  const guess = errorGuess(text, tool);
+  await $.state.set(ERROR_INFO, { at, tool, lines: errorLines(guess), mode: "lines", sameCount, isLoading: true } satisfies TamacodeErrorInfo);
+  const prompt = errorPrompt(text, tool, guess);
+  $.clock.after(0, () => {
+    void (async () => {
+      let refined = null as ReturnType<typeof parseErrorLines>;
+      let failed = false;
+      try {
+        const r = await $.model.complete({
+          model: SUMMARY_MODEL,
+          system: "あなたは、プログラムを知らない人に向けて、コンピュータのエラーをやさしい日本語で説明する係です。",
+          prompt,
+          effort: "low",
+          maxTokens: 300,
+          timeoutMs: 15000,
+        });
+        if (r.isAnswered) refined = parseErrorLines(r.text);
+        else failed = true;
+      } catch (err) {
+        failed = true;
+        $.ui.log(`エラーの言い直しに失敗: ${String(err)}`, { to: "debug" });
+      }
+      const cur = await readErrorInfo($);
+      if (cur === null || cur.at !== at || !cur.isLoading) return; // もう別のエラー・消えた・「詰まってます」に変わった
+      if (failed) {
+        const head = errorHeadlineLong(text);
+        await $.state.set(ERROR_INFO, { ...cur, lines: [head === "" ? t("error.what.unknown", { tool }) : head, t("error.rawStuck")], mode: "raw", isLoading: false });
+      } else {
+        await $.state.set(ERROR_INFO, { ...cur, lines: refined !== null ? errorLines(refined) : cur.lines, isLoading: false });
+      }
+      $.ui.invalidate("ui.render");
+    })();
+  });
 }
 
 // ---------- 今やってること（state） ----------
@@ -638,7 +691,7 @@ export const register: Register = (on) => {
       });
     }
     const at = await $.clock.now();
-    await Promise.all([$.state.set(WANDER, null), $.state.set(NOW, null), $.state.set(NOTICE, null), $.state.set(PERMISSION, null), forgetOutputs($, at)]);
+    await Promise.all([$.state.set(WANDER, null), $.state.set(NOW, null), $.state.set(NOTICE, null), $.state.set(PERMISSION, null), $.state.set(ERROR_INFO, null), forgetOutputs($, at)]);
     return next(e);
   });
 
@@ -743,7 +796,7 @@ export const register: Register = (on) => {
     }
     const desc = describeTool(like.tool, like as unknown as Record<string, unknown>, cwd);
     const at = await $.clock.now();
-    await $.state.set(PERMISSION, null); // 許可が下りた（または別の道具に移った）ので翻訳は消す
+    await Promise.all([$.state.set(PERMISSION, null), $.state.set(ERROR_INFO, null)]); // 許可が下りた／次の道具に移ったので、翻訳は消す
     if (desc.text !== "") {
       await setNow($, { phase: desc.isWaiting ? "waiting" : "running", face: desc.face, text: desc.text, tool: like.tool, isLong: desc.isLong }, { log: true });
     }
@@ -766,7 +819,14 @@ export const register: Register = (on) => {
       $.ui.log(`結果の表示に失敗: ${String(err)}`, { to: "debug" });
     }
 
-    await countError($, r);
+    const sameCount = await countError($, r);
+    if (sameCount > 0) {
+      try {
+        await explainError($, resultText(r), like.tool, sameCount, at);
+      } catch (err) {
+        $.ui.log(`エラー翻訳に失敗: ${String(err)}`, { to: "debug" });
+      }
+    }
     try {
       await collectTerms($, r, at);
     } catch (err) {
@@ -786,11 +846,12 @@ export const register: Register = (on) => {
 
   // 入力欄の上の帯: 今やってること＋待ってていいか（1 行、上書き。あなたの番なら黄色）＋ 迷走の注意
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
-    const [now, wGot, nGot, perm, clock] = await Promise.all([readNow($), $.state.get(WANDER), $.state.get(NOTICE), readPermission($), $.clock.now()]);
+    const [now, wGot, nGot, perm, errInfo, clock] = await Promise.all([readNow($), $.state.get(WANDER), $.state.get(NOTICE), readPermission($), readErrorInfo($), $.clock.now()]);
     const shown = e.props.isWorking && now !== null && now.text !== "" ? judge(now, clock) : null;
     const w = (wGot.value as TamacodeWander | null | undefined) ?? null;
     const notice = (nGot.value as TamacodeNotice | null | undefined) ?? null;
-    if (e.props.hasSurvey || (shown === null && w === null && notice === null)) return next(e);
+    const errShown = e.props.isWorking ? errInfo : null;
+    if (e.props.hasSurvey || (shown === null && w === null && notice === null && errShown === null)) return next(e);
     // 許可待ちのときだけ、4 行の翻訳を黄色い行の下に出す。危険度が高ければ怒り顔
     const permShown = shown !== null && shown.isYourTurn && perm !== null ? perm : null;
     const mainLine = permShown !== null && permShown.level === "high" ? shown!.line.replace(CAT.sleep, CAT.danger) : shown?.line;
@@ -825,6 +886,16 @@ export const register: Register = (on) => {
               </Text>
             ) : null}
             {permShown.isLoading ? <Text dimColor>{t("permission.loading")}</Text> : null}
+          </Box>
+        ) : null}
+        {errShown !== null ? (
+          <Box flexDirection="column" paddingLeft={2}>
+            {errShown.lines.map((l) => (
+              <Text color={errShown.mode === "stuck" ? "yellow" : undefined} bold={errShown.mode === "stuck"} dimColor={errShown.mode === "raw"} wrap="truncate-end">
+                {l}
+              </Text>
+            ))}
+            {errShown.isLoading ? <Text dimColor>{t("error.loading")}</Text> : null}
           </Box>
         ) : null}
         {w !== null ? (

@@ -147,6 +147,22 @@ export type TamacodePermission = {
   isLoading: boolean;
 };
 
+/** エラー翻訳（帯に出す 3 行） */
+export type TamacodeErrorInfo = {
+  /** 出た時刻（エポックミリ秒） */
+  at: number;
+  /** 失敗した道具 */
+  tool: string;
+  /** 何が起きた／Claudeが直せるか／あなたがやること（ラベル付き）。詰まりなら 1 行、モデル失敗なら生の 1 行＋詰まってます */
+  lines: string[];
+  /** lines: 3 行の説明 / stuck: 同じエラーが続いている / raw: モデルが失敗して生の 1 行 */
+  mode: "lines" | "stuck" | "raw";
+  /** 同じエラーが続いた回数 */
+  sameCount: number;
+  /** モデルの言い直しを待っているか */
+  isLoading: boolean;
+};
+
 /** /log ペインに並べる1行 */
 export type TamacodeLogEntry = {
   /** 最後にこの行を出した時刻（エポックミリ秒） */
@@ -176,6 +192,8 @@ declare module 'claude-code' {
       notice: TamacodeNotice | null;
       /** 許可プロンプトの翻訳。出ていなければ null */
       permission: TamacodePermission | null;
+      /** エラー翻訳。直近の道具がエラーでなければ null */
+      errorInfo: TamacodeErrorInfo | null;
       /** 自動バックアップの一覧。新しい順、最大 100 件 */
       backups: TamacodeBackup[];
       /** 迷走検知。何も無ければ null */
