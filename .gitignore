@@ -1,0 +1,16 @@
+# OS
+.DS_Store
+
+# 依存・生成物（bunx tsc などが作る）
+node_modules/
+bun.lock
+bun.lockb
+package-lock.json
+*.tsbuildinfo
+
+# Claude Code が生成する型定義（/plugin-types で作り直せる）
+.claude-plugin/types/*
+!.claude-plugin/types/.gitignore
+
+# ローカル設定
+.claude/settings.local.json

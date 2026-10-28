@@ -1,0 +1,205 @@
+# TAMACODE plugin for Claude Code
+
+**プログラムを知らない人でも Claude Code を安心して使えるようにする、日本語のプラグイン**です。
+
+- いま Claude が何をしているか、待っていていいかを入力欄の上の帯に猫の顔文字つきで出す
+- ファイルの変更を「プログラムを知らない人向け」の日本語 2 文で要約する（`/changes`）
+- 返事やエラーに出た専門用語を横のペインで一言説明する（`/terms`）
+- 同じファイルを読みすぎ・同じエラーを繰り返しているときに「迷ってます」と知らせる
+- Spinner（`Flowing…`）や完了行（`Crunched for 4s`）を日本語にする
+
+> **注意**: この plugin の中心は Claude Code の **hooks module（function hooks）** という早期アクセス機能です。
+> 使うには環境変数 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` が必要で、Claude Code のバージョンアップで API が変わり動かなくなる可能性があります。
+> 動作確認したバージョン: Claude Code 2.1.285（macOS）。
+
+## インストール
+
+```bash
+git clone https://github.com/tama11111/tamacode.git
+claude plugin marketplace add ./tamacode
+claude plugin install tamacode@tamacode-marketplace
+```
+
+`~/.claude/settings.json` に次を足して、Claude Code を起動し直します（ユーザー単位なので、どのフォルダで起動しても効きます）。
+
+```json
+{ "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" } }
+```
+
+更新するときは、clone したフォルダで `git pull` してから `claude plugin update tamacode@tamacode-marketplace` → セッション内で `/reload-plugins` です。
+
+## 構成
+
+| パス | 役割 |
+| --- | --- |
+| `.claude-plugin/plugin.json` | プラグインのマニフェスト（名前・バージョン・各コンポーネントの場所） |
+| `.claude-plugin/marketplace.json` | ローカルマーケットプレイスとしてインストールするための定義 |
+| `skills/tamacode/SKILL.md` | スキル。`/tamacode` または「tamacode」と言うと起動 |
+| `agents/tamacode-reviewer.md` | サブエージェント。日本語コードレビュー |
+| `hooks/hooks.json` | フック定義（SessionStart）と hooks module の指定（`modules`） |
+| `scripts/on-session-start.sh` | SessionStart フックの実体 |
+| `hooks/tamacode.tsx` | hooks module の入口。下の 3 つをまとめて登録する |
+| `hooks/changes.tsx` | 変更履歴ペイン（`/changes`）の実体 |
+| `hooks/terms.tsx` | 用語翻訳ペイン（`/terms`）の実体。組み込み辞書もここ |
+| `hooks/activity.tsx` | 今やってることの帯・履歴（`/log`）・迷走検知・Spinner の日本語化の実体 |
+| `hooks/*.test.tsx` | 各機能のテスト（`claude plugin test .`） |
+| `types/tamacode.d.ts` | 型契約。`$.state` に置く値の型（`plugin.json` の `types`） |
+| `.claude-plugin/types/` | Claude Code が生成する型定義置き場（リポジトリには入れない。「型チェックを通すには」参照） |
+
+## 今なにをしているか・待ってていいかを帯に出す（帯・/log・Spinner）
+
+ツールが動くたびに、入力欄の上の帯に **1 行だけ上書き** で出ます。会話には残りません（作業が長くても会話が埋まらない）。
+
+```
+猫の顔 ＋ いま何をしているか（道具の名前は日本語、対象のファイルやコマンドつき）＋ 経過時間 ＋ 待っていいかの一言
+ヽ(=^･q･^=)ノ ビルド中: npm run build　1分5秒　時間がかかる作業なので待ってOK
+```
+
+### 待ってていいかの判定（4 つの状態）
+
+| 状態 | いつ | 一言 |
+| --- | --- | --- |
+| A 実行中 | `tool.call` が来て結果がまだ。Bash は何のコマンドかを表示 | 時間がかかる作業（Bash は install / build / test / dev / npx / curl など、ほかに WebFetch・サブエージェント・MCP）なら「時間がかかる作業なので待ってOK」。それ以外は一言なし |
+| B 書き出し中 | モデルの文字が増えている（`turn.step`） | 「書き出し中なので待ってOK」 |
+| C 返事待ち | 許可ダイアログ（`PermissionRequest`）や質問（AskUserQuestion）で止まっている | 「あなたの番です」（いくら経っても変わらない） |
+| D 無反応 | A〜C のどれでもなく、最後の変化から 60 秒超 | 60 秒で「動いてないかも」、120 秒で「Escで止めて続きを頼むのが安全」 |
+
+- 「最後に変化があった時刻」は tool.call・結果・文字の増加・ダイアログ表示のどれかで更新します
+- 時間がかかる系でない Bash（`cat` や `echo` など）が 60 秒を超えたときも D と同じ扱いです
+- 経過時間は 1 秒ごとに描き直します
+- 道具が終わると「次を考えてる」、エラーなら「エラーが出ました: 見出し」、拒否されたら「止めました: 理由」になります
+
+### 猫の顔
+
+| 状態 | 顔 | 出る場面 |
+| --- | --- | --- |
+| 通常・待機 | `(=^･q･^=)` | /log の見出し、スキル |
+| 読んでる | `(=^･q･^=)` | Read、Bash の cat / head / sed、Grep / Glob、git の状態 |
+| 書いてる | `ฅ(=^･q･^=)ฅ` | Edit / Write、道具の指示を書いている間 |
+| 考え中 | `(=･q･=)?` | Spinner の考え中、道具が終わって次を考えている間、計画 |
+| ネット検索 | `(=^･q･^=)ゞ` | WebFetch / WebSearch / curl / MCP / 外部サービスの CLI |
+| コマンド実行 | `ヽ(=^･q･^=)ノ` | Bash（ビルド・テスト・インストールなど）、サブエージェント |
+| 完了 | `(=^‥q‥^=)ﾉ` | 返事の最後の行「✻ 4秒で完了」の代わり |
+| ひと区切り | `(=｡･q･｡=)` | 返事を書いている間（Spinner の responding）、TodoWrite |
+| エラー | `(=T_q_T=)` | 道具がエラーで終わった、無反応 60 秒 |
+| 迷ってる | `(=´･q･`=)` | 迷走検知の帯とトースト |
+| 危ない操作 | `(=｀･q･´=)ﾉ` | rm / git push / reset --hard など、変更履歴の危険マーク |
+| 止めた | `(=｀q´=)つ` | 道具が拒否された、無反応 120 秒 |
+| 寝てる・待ち | `(=-q-=)zzZ` | 許可待ち、質問待ち、空のペイン |
+
+### そのほか
+
+- ファイル名は作業フォルダからの相対（外のファイルは末尾の名前だけ）。Bash は `cat` / `head` / `tail` / `sed` / `less` などの引数からファイル名を抜いて、迷走検知の読み回数にも数えます（オプション・`100,330p` のような番地・リダイレクト・`$変数` は無視）
+- 履歴は `/log` で右側のペインに新しい順で出ます（Esc で閉じる）。同じことが続いたときは 1 行にまとめて「×3」のように出ます（最大 200 件）。エラーや拒否、許可待ちも残ります
+- Spinner（`Flowing…` のような英語）は「(=･q･=)? 考え中…」「(=｡･q･｡=) 書いてます…」になり、ツールを動かしている間は帯と同じ文になります
+- 返事の最後の `Crunched for 4s` は「(=^‥q‥^=)ﾉ 4秒で完了」になります
+- ツールの実行や許可確認は一切変えません（表示するだけ）
+- 文言を変えたいときは `hooks/activity.tsx` の `describeTool()` と `BASH_RULES`、判定は `judge()`、顔は `CAT` を編集してください
+
+## 変更履歴ペイン（/changes）
+
+Claude が Edit / Write / MultiEdit でファイルを書き換えるたびに記録して、`/changes` で右側（フルスクリーン時はドック、通常時はプロンプトの上）にペインを開きます。
+
+- 1件ごとに「時刻・ファイル名（末尾のみ）・要約・＋n行 −n行」を新しい順に表示
+- 要約は軽いモデル（haiku）に「プログラムを知らない人向けに日本語2文以内。1文目は何をしたか、2文目はそれで何が変わるか。専門用語禁止」で頼んで作る
+- 1件を選ぶ（Tab や矢印で合わせて Enter、またはクリック）と元の差分（Code 部品）が開く。もう一度で閉じる
+- 削除・データベース・認証/ログイン・支払い・`.env`・`rm` に関わる変更は行頭に危ない操作の猫 `(=｀･q･´=)ﾉ` を付け、要約の末尾に「※壊れると困る所です。不安なら戻してと言ってください」を添える
+- 履歴は `$.state`（表示用）と `$.store`（再起動対策）に保存。起動時に `$.store` から読み戻す。50件を超えたら古いものから消す
+- 要約の呼び出しが失敗しても止まらず、「ファイル名＋行数」だけで表示する
+- Esc でペインを閉じる
+
+## 用語翻訳ペイン（/terms）
+
+Claude の返事が終わるたびに本文を読み、辞書にある専門用語（デプロイ、マイグレーション、環境変数…）を拾って、右側のペインに「一言説明」を出てきた順に並べます。読み飛ばさずに済むための物です。
+
+- 画面が広ければ（144 桁以上）起動時に勝手に右側へ出ます。狭いときは `/terms` で開きます（Esc で閉じる）
+- 組み込み辞書は `hooks/terms.tsx` の `BUILTIN`（約 110 語）。日本語・英語どちらの表記でも拾います
+- コードブロック（``` で囲まれた所）の中の単語は拾いません。「ログイン」の中の「ログ」のような部分一致も拾いません
+- サブエージェントの返事や、途中で止まった返事は見ません
+- **ツールの出力も見ます**。エラーになった結果は全部、成功した結果は `npm ERR!` / `Error` / `Warning` / `failed` / `エラー` などを含む行だけを対象にして、そこに出た用語を「ツールの出力から」の印つきで並べます（返事の語が先、ツール出力だけの語が後）。新しいターンが始まると前のターンの出力ぶんは消えます
+
+### 辞書を育てる
+
+自分の辞書は `~/.claude/tamacode-terms.json` に保存されます。組み込みより優先されます。
+
+| コマンド | 働き |
+| --- | --- |
+| `/terms add 用語 説明` | 自分の辞書に足す（`用語: 説明` でも可）。開いているペインにもすぐ反映 |
+| `/terms rm 用語` | 自分の辞書から消す |
+| `/terms know 用語` | もう知ってるので今後は出さない（ペインの「知ってる」ボタンでも同じ） |
+| `/terms unknow 用語` | また出すようにする |
+| `/terms list` | 自分の辞書と「知ってる」の一覧 |
+| `/terms file` | 辞書ファイルの場所 |
+
+ファイルを直接編集しても構いません（形: `{ "terms": { "用語": "説明" }, "known": ["知ってる用語"] }`）。編集後は Claude を再起動すると読み直します。壊れた JSON でも止まらず、組み込み辞書だけで動きます。
+
+## 迷走検知（プロンプトの上の帯）
+
+ひとつの返事の中で次のどちらかに当たったら、プロンプトの上に
+「(=´･q･`=) Claudeが迷ってます。目的をもう一度言い直すか、/plan で整理すると抜けやすいです」という帯を出し、最初の 1 回だけトースト（通知）も出します。
+
+- 同じファイルを **5 回以上** 読んでいる（Read ツールだけでなく、Bash の `cat` / `head` / `sed` などで開いたファイルも数える。相対パスは作業フォルダ基準で Read と同じ鍵にする）
+- 同じエラーが **3 回以上** 続いている（ツールの失敗文を、数字を潰して先頭 3 行で比べる。行番号が違っても同じエラー扱い）
+
+帯には「api.ts を 5 回読んでいます」「同じエラーが 3 回続いています: …」のような補足が付きます。
+次にあなたが話しかける（新しいターンが始まる）と数え直して帯も消えます。帯の「閉じる」でも消えます。サブエージェントの道具は数えません。
+回数を変えたいときは `hooks/activity.tsx` の `READ_LIMIT` / `ERROR_LIMIT` を編集してください。
+
+## hooks module を増やすときの決まり
+
+- `hooks.json` の `modules` に書けるのはプラグインにつき 1 つ。機能を増やすときは `hooks/<機能>.tsx` を作って `hooks/tamacode.tsx` から `register` を呼ぶ
+- マッチャー無しの同じイベント（`on("session.start", hook)` など）は module 全体で 1 回しか登録できない。2 つ目からはマッチャー付きで登録する（`terms.tsx` の `session.start` が `{ isInteractive: true }` 付きなのはこのため。`/log` のコマンド登録を `changes.tsx` の `session.start` で行っているのも同じ理由）
+- マッチャー無しの `tool.call` / `turn.start` / `turn.complete` / `turn.step` は `activity.tsx` が持つ。道具の前後で何かしたいときはそこに足す
+- `$` を別ファイルの関数に渡すと `claude plugin validate` に拒否される。`$` を使う処理は同じファイルの中で書く
+
+### 動かすのに必要なこと
+
+hooks module は早期アクセス機能なので、環境変数 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` が必要です。
+毎回打たなくて済むよう、`~/.claude/settings.json` に書いてあります。
+
+```json
+{ "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" } }
+```
+
+これがあれば、ふつうに `claude` と起動するだけで `/changes` `/terms` `/log`、帯、迷走検知、Spinner の日本語化が使えます。
+
+- 無いときは `/changes` `/terms` `/log` が登録されず、ペインも帯も出ません（SessionStart の従来フックは動きます）
+- このフォルダを直した後は `claude plugin update tamacode@tamacode-marketplace` で入れ直し、Claude を再起動する
+- `$.store` はプラグインの読み込み元ごとに別ファイルになります（`--plugin-dir` で読んだときとインストール後で履歴は共有されません）
+- 判定の言葉を変えたいときは `hooks/changes.tsx` の `RISK_PATH_RULES` / `RISK_TEXT_RULES`、要約のお願い文は `summaryPrompt()` を編集してください
+
+### 検証とテスト
+
+```bash
+export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
+claude plugin validate ./.claude-plugin/plugin.json   # マニフェスト・型契約・hooks module を検証
+claude plugin test .                                   # hooks/*.test.tsx を実行
+```
+
+`.claude-plugin/` には marketplace.json もあるため、`claude plugin validate .` はマーケットプレイス側だけを見ます。プラグイン本体は `plugin.json` のパスを渡してください。
+
+## 開発中に試す
+
+```bash
+# 検証（マーケットプレイス定義）
+claude plugin validate .
+
+# このディレクトリをプラグインとして読み込んで起動（変更履歴ペインも有効にする）
+CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .
+```
+
+## 型チェックを通すには
+
+`.claude-plugin/types/` は Claude Code が生成する型定義の置き場で、リポジトリには入っていません。
+Claude Code のセッション内で `/plugin-types .claude-plugin/types` を実行すると生成され、`bunx tsc -p tsconfig.json`（または `npx -p typescript tsc`）が通るようになります。
+
+## ライセンス
+
+MIT（[LICENSE](./LICENSE)）
+
+## 追加できるコンポーネント
+
+- `skills/<name>/SKILL.md` を増やすとスキルが増える
+- `agents/<name>.md` を増やすとサブエージェントが増える
+- `hooks/hooks.json` に `PreToolUse` / `PostToolUse` / `Stop` などを追加できる
+- `.mcp.json` を置くと MCP サーバーを同梱できる

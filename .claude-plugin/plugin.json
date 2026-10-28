@@ -1,0 +1,15 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "tamacode",
+  "version": "0.4.0",
+  "description": "TAMACODE plugin for Claude Code",
+  "author": {
+    "name": "tama11111",
+    "email": "192690016+tama11111@users.noreply.github.com"
+  },
+  "keywords": ["tamacode", "tama"],
+  "skills": ["./skills"],
+  "agents": ["./agents/tamacode-reviewer.md"],
+  "hooks": "./hooks/hooks.json",
+  "types": "./types/tamacode.d.ts"
+}

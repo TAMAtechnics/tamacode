@@ -1,0 +1,13 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "tamacode-marketplace",
+  "owner": { "name": "tama11111" },
+  "metadata": { "description": "TAMACODE のローカルプラグイン置き場" },
+  "plugins": [
+    {
+      "name": "tamacode",
+      "source": "./",
+      "description": "TAMACODE plugin for Claude Code"
+    }
+  ]
+}
