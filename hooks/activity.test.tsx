@@ -19,6 +19,8 @@ type SetupOptions = {
   toasts?: string[];
   /** 3 行まとめの底が返す文 */
   summary?: string;
+  /** turn.step の底が流す Claude の文（スピナーの「目的」を拾う元） */
+  said?: string;
 };
 
 function setup(on: On, opts: SetupOptions = {}) {
@@ -37,6 +39,10 @@ function setup(on: On, opts: SetupOptions = {}) {
   on("env.get", () => ({ value: "/home/tama" }));
   on("fs.read", () => ({ value: "const a = 1;\n" }));
   on("turn.start", (_$, e) => ({ turnId: e.turnId }));
+  on("turn.step", async function* (_$, e) {
+    if (opts.said !== undefined) yield { kind: "text", index: 0, text: opts.said } as any;
+    return { turnId: e.turnId, index: e.index, answer: opts.said ?? "", toolUses: [], stopReason: "end_turn", usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as any;
+  });
   on("turn.complete", (_$, e) => ({ text: e.answer }));
   on("model.complete", () => ({
     value: {
@@ -199,22 +205,33 @@ test("/log で履歴ペインが開き、同じことが続いたら ×n にま�
   expect(i).toBeLessThan(j);
 });
 
-test("Spinner は猫だけになる（文言と時間は帯に寄せる）", async ($, on) => {
-  setup(on);
-  const spinner = async (mode: string) => {
-    const ui = await $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "Spinner", requestId: "main", props: { word: "Flowing", message: null, suffix: "…", mode } as any });
+test("Spinner は実況になる: 猫 ＋ 動作 ＋ 対象 ＋ 目的 ＋ 経過時間（幅に合わせて目的 → 対象の順に削る）", async ($, on) => {
+  const clock = setup(on, { bashTakes: 100_000, said: "起動ロゴのコードを探して、表示を「TAMAコード」に変えます。\n" });
+  const spinner = async (mode: string, columns = 160) => {
+    const ui = await $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "Spinner", requestId: "main", viewport: { columns, rows: 40, isDocked: false } as any, props: { word: "Flowing", message: null, suffix: "…", mode } as any });
     const texts = (await ui.findAll({ type: "Text" })).map((t) => t.text);
     await ui.unmount();
     return texts;
   };
 
-  expect(await spinner("thinking")).toEqual([CAT.think]);
-  expect(await spinner("responding")).toEqual([CAT.pause]);
-  expect(await spinner("tool-use")).toEqual([CAT.run]);
+  // 道具も文字も無い: エンジンの mode から仮の文（時間は無し）
+  expect(await spinner("thinking")).toEqual([`${CAT.think} 次の手を考えてます`]);
+  expect(await spinner("responding")).toEqual([`${CAT.pause} 返事を書いてます`]);
+  expect(await spinner("tool-use")).toEqual([`${CAT.run} 道具を使ってます`]);
 
-  await $.turn.start({ text: "見て", turnId: "t1" });
-  await bash($, "cat -n hooks/terms.tsx");
-  expect(await spinner("tool-use")).toEqual([CAT.think]);
+  // 直前の発言から目的を拾い、Bash は description を動作にする。時間はこの動作が始まってから
+  await $.turn.start({ text: "ロゴを直して", turnId: "t1" });
+  for await (const _ of $.turn.step({ turnId: "t1", index: 0, model: "m", messageCount: 1 } as any) as any) void _;
+  const call = bash($, "which figlet && figlet TAMACODE");
+  void call.catch(() => undefined);
+  await clock.settle();
+  await clock.advance(12_000);
+  expect(await spinner("tool-use")).toEqual([`${CAT.run} figlet が入ってるか確認するコマンドを実行して、表示を「TAMAコード」に変えます（12s）`]);
+  // 狭いと目的が落ち、もっと狭いと対象も落ちる（猫・動作・時間は残る）
+  expect(await spinner("tool-use", 110)).toEqual([`${CAT.run} figlet が入ってるか確認するコマンドを実行中（12s）`]);
+  expect(await spinner("tool-use", 70)).toEqual([`${CAT.run} コマンドを実行中（12s）`]);
+  // 道具の名前（Bash / Read）は出ない
+  expect((await spinner("tool-use")).join("")).not.toMatch(/Bash|Read/);
 });
 
 test("書き出し中の言い換え: 道具の指示は「次の作業の準備中（対象つき）」になる", () => {

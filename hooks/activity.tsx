@@ -19,11 +19,12 @@
 // ツールの実行は一切止めない（見せるだけ）。
 
 import type { EngineInterface, Register } from "claude-code";
-import type { TamacodeErrorInfo, TamacodeFinding, TamacodeLogEntry, TamacodeNotice, TamacodeNow, TamacodePermission, TamacodeRead, TamacodeSummary, TamacodeTerms, TamacodeWander } from "../types/tamacode";
+import type { TamacodeErrorInfo, TamacodeFinding, TamacodeLive, TamacodeLogEntry, TamacodeNotice, TamacodeNow, TamacodePermission, TamacodeRead, TamacodeSummary, TamacodeTerms, TamacodeWander } from "../types/tamacode";
 import { errorGuess, errorLines, errorPrompt, looksLikeError, parseErrorLines, errorHeadline as errorHeadlineLong } from "./errors";
 import { t } from "./locale";
 import { parsePermission, permissionGuess, permissionLines, permissionPrompt } from "./permission";
 import { EMPTY_STATS, barForNow, getVibeConfig, logLineFor } from "./vibe";
+import { composeLive, liveFallback, liveForPrep, liveForTool, liveForWriting, liveOne, purposeFrom } from "./live";
 import type { TamacodeVibeStats } from "../types/tamacode";
 import { buildTerms, pickErrorLines } from "./terms";
 
@@ -387,12 +388,19 @@ export function judge(now: TamacodeNow, clock: number): Verdict {
   return { face, line, verdict, isYourTurn };
 }
 
-// Spinner は猫だけ（文言と時間は帯に寄せる。同じ文が 2 か所に出ると煩い）
+// Spinner の猫。帯と同じ判定（止まってそうなら困った顔）
 export function spinnerFace(mode: string, now: TamacodeNow | null): string {
   if (now !== null && now.text !== "") return judge(now, now.at).face;
   if (mode === "tool-use" || mode === "tool-input") return CAT.run;
   if (mode === "responding") return CAT.pause;
   return CAT.think;
+}
+
+// Spinner の 1 行: 猫 ＋ 動作 ＋ 対象 ＋ 目的 ＋ 経過時間（この動作が始まってから）。帯は「待っていいか」の判定役、こちらは実況役
+export function spinnerText(mode: string, now: TamacodeNow | null, at: number, columns: number): string {
+  const face = spinnerFace(mode, now);
+  const live = now?.live ?? liveFallback(mode);
+  return composeLive(face, live, now === null ? null : at - now.startedAt, columns);
 }
 
 // ---------- ひと区切りの 3 行まとめ ----------
@@ -582,6 +590,10 @@ let lastPrompt = "";
 let ticker: { cancel: () => void } | null = null;
 let lastTokenWrite = 0; // Date.now() 基準（state を書く間隔の制御だけに使う）
 let lastTokenText = "";
+let turnSaid = ""; // このターンで Claude が書いた文（末尾だけ保つ）。スピナーの「目的」を拾う元
+let turnChars = 0; // このターンで Claude が書いた文字数（スピナーの「↓1.8k文字」）
+let touchedThisTurn = false; // このターンで道具を 1 回でも使ったか（「まだ何も触ってません」の判定）
+const SAID_KEEP = 3000;
 
 const flag = async ($: Dollar, w: TamacodeWander) => {
   await $.state.set(WANDER, w);
@@ -677,14 +689,14 @@ async function readNow($: Dollar): Promise<TamacodeNow | null> {
   return v && typeof v === "object" && typeof v.text === "string" ? v : null;
 }
 
-type NowPatch = Pick<TamacodeNow, "phase" | "face" | "text" | "tool" | "isLong">;
+type NowPatch = Pick<TamacodeNow, "phase" | "face" | "text" | "tool" | "isLong"> & { live?: TamacodeLive | null };
 
 // 状態を置き換える。文が同じなら経過時間の起点は保ち、「最後の変化」だけ更新する
 async function setNow($: Dollar, patch: NowPatch, options: { log?: boolean } = {}): Promise<TamacodeNow> {
   const at = await $.clock.now();
   const cur = await readNow($);
   const same = cur !== null && cur.phase === patch.phase && cur.text === patch.text;
-  const next: TamacodeNow = { ...patch, startedAt: same ? cur.startedAt : at, at };
+  const next: TamacodeNow = { ...patch, live: patch.live ?? null, startedAt: same ? cur.startedAt : at, at };
   await $.state.set(NOW, next);
   if (options.log === true && patch.text !== "") await appendLog($, `${patch.face} ${patch.text}`, at);
   return next;
@@ -758,6 +770,9 @@ export const register: Register = (on) => {
     }
     lastPrompt = e.text;
     lastTokenText = "";
+    turnSaid = "";
+    turnChars = 0;
+    touchedThisTurn = false;
     if (ticker === null) {
       ticker = $.clock.every(TICK_MS, () => {
         if (isTurnRunning) $.ui.invalidate("ui.render");
@@ -854,20 +869,28 @@ export const register: Register = (on) => {
       try {
         let text: string | null = null;
         let face: string = CAT.write;
+        let live: TamacodeLive | null = null;
         if (chunk.kind === "thinking") {
           text = "考えてる";
           face = CAT.think;
+          live = liveForWriting("thinking", { touched: touchedThisTurn, chars: turnChars });
         } else if (chunk.kind === "text") {
           text = "返事を書いてる";
           face = CAT.pause;
+          turnChars += chunk.text.length;
+          turnSaid = (turnSaid + chunk.text).slice(-SAID_KEEP);
+          live = liveForWriting("text", { touched: touchedThisTurn, chars: turnChars });
         } else if (chunk.kind === "tool") {
           toolByBlock.set(chunk.index, chunk.name);
           jsonByBlock.set(chunk.index, "");
           text = prepText(chunk.name, {}, cwd);
+          live = liveForPrep(chunk.name, {});
         } else if (chunk.kind === "input") {
           const json = (jsonByBlock.get(chunk.index) ?? "") + chunk.json;
           jsonByBlock.set(chunk.index, json.length > 4000 ? json.slice(0, 4000) : json);
-          text = prepText(toolByBlock.get(chunk.index) ?? "", extractTarget(json), cwd);
+          const target = extractTarget(json);
+          text = prepText(toolByBlock.get(chunk.index) ?? "", target, cwd);
+          live = liveForPrep(toolByBlock.get(chunk.index) ?? "", target);
         } else if (chunk.kind === "stop" && chunk.usage) {
           // HUD: 実際に使ったトークン（1 ステップ分）
           const u = chunk.usage;
@@ -880,7 +903,7 @@ export const register: Register = (on) => {
           if (text !== lastTokenText || wall - lastTokenWrite >= TOKEN_WRITE_MS) {
             lastTokenText = text;
             lastTokenWrite = wall;
-            await setNow($, { phase: "writing", face, text, tool: null, isLong: true });
+            await setNow($, { phase: "writing", face, text, tool: null, isLong: true, live });
           }
         }
       } catch (err) {
@@ -896,7 +919,7 @@ export const register: Register = (on) => {
       const tool = String(e.tool_name ?? "");
       const input = (e.tool_input ?? {}) as Record<string, unknown>;
       const desc = describeTool(tool, input, cwd);
-      const now = await setNow($, { phase: "waiting", face: CAT.sleep, text: `${t("band.waitingPermission")}: ${desc.text}`, tool, isLong: false }, { log: true });
+      const now = await setNow($, { phase: "waiting", face: CAT.sleep, text: `${t("band.waitingPermission")}: ${desc.text}`, tool, isLong: false, live: liveOne(`許可を待ってます: ${desc.text}`, "許可を待ってます") }, { log: true });
       await explainPermission($, tool, input, now.at);
     } catch (err) {
       $.ui.log(`許可待ちの表示に失敗: ${String(err)}`, { to: "debug" });
@@ -910,7 +933,7 @@ export const register: Register = (on) => {
       try {
         const cur = await readNow($);
         if (cur === null || cur.phase !== "waiting") {
-          await setNow($, { phase: "waiting", face: CAT.sleep, text: t("band.waitingPermission"), tool: null, isLong: false }, { log: true });
+          await setNow($, { phase: "waiting", face: CAT.sleep, text: t("band.waitingPermission"), tool: null, isLong: false, live: liveOne("許可を待ってます") }, { log: true });
         }
       } catch (err) {
         $.ui.log(`許可待ちの表示に失敗: ${String(err)}`, { to: "debug" });
@@ -934,8 +957,10 @@ export const register: Register = (on) => {
     const desc = describeTool(like.tool, like as unknown as Record<string, unknown>, cwd);
     const at = await $.clock.now();
     await Promise.all([$.state.set(PERMISSION, null), $.state.set(ERROR_INFO, null)]); // 許可が下りた／次の道具に移ったので、翻訳は消す
+    touchedThisTurn = true;
     if (desc.text !== "") {
-      await setNow($, { phase: desc.isWaiting ? "waiting" : "running", face: desc.face, text: desc.text, tool: like.tool, isLong: desc.isLong }, { log: true });
+      const live = liveForTool(like.tool, like as unknown as Record<string, unknown>, purposeFrom(turnSaid));
+      await setNow($, { phase: desc.isWaiting ? "waiting" : "running", face: desc.face, text: desc.text, tool: like.tool, isLong: desc.isLong, live }, { log: true });
     }
     for (const f of desc.readFiles) await countRead($, f);
     // HUD: 下段のログと、読んだファイル・編集回数
@@ -978,12 +1003,14 @@ export const register: Register = (on) => {
     // 結果: 止められた / エラー / ふつうに終わって次を考えている
     try {
       if (r.deny !== undefined) {
-        await setNow($, { phase: "between", face: CAT.stopped, text: t("band.stopped", { reason: short(r.deny, 50) }), tool: like.tool, isLong: false }, { log: true });
+        const stoppedText = t("band.stopped", { reason: short(r.deny, 50) });
+        await setNow($, { phase: "between", face: CAT.stopped, text: stoppedText, tool: like.tool, isLong: false, live: liveOne(stoppedText, "止めました") }, { log: true });
       } else if (r.isError === true) {
         const head = errorHeadline(resultText(r));
-        await setNow($, { phase: "between", face: CAT.error, text: t("band.error", { head: head === "" ? "" : `: ${head}` }), tool: like.tool, isLong: false }, { log: true });
+        const errorText = t("band.error", { head: head === "" ? "" : `: ${head}` });
+        await setNow($, { phase: "between", face: CAT.error, text: errorText, tool: like.tool, isLong: false, live: liveOne(errorText, "エラーが出ました") }, { log: true });
       } else {
-        await setNow($, { phase: "between", face: CAT.think, text: t("band.thinkingNext"), tool: null, isLong: false });
+        await setNow($, { phase: "between", face: CAT.think, text: t("band.thinkingNext"), tool: null, isLong: false, live: liveOne("次を考えてます") });
       }
     } catch (err) {
       $.ui.log(`結果の表示に失敗: ${String(err)}`, { to: "debug" });
@@ -1152,10 +1179,10 @@ export const register: Register = (on) => {
     );
   });
 
-  // Spinner（Flowing… など）は猫だけにする（文言と時間は帯に）
+  // Spinner（Flowing… など）を実況に: 猫 ＋ 動作 ＋ 対象 ＋ 目的 ＋ 経過時間。端末幅に合わせて目的 → 対象の順に削る
   on("ui.render", { component: "Spinner" }, async ($, e, next) => {
-    const now = await readNow($);
-    return next({ ...e, props: { ...e.props, word: spinnerFace(e.props.mode, now), suffix: "" } });
+    const [now, at] = await Promise.all([readNow($), $.clock.now()]);
+    return next({ ...e, props: { ...e.props, word: spinnerText(e.props.mode, now, at, e.viewport?.columns ?? 0), suffix: "" } });
   });
 
   // 返事の最後の行（Crunched for 4s）を猫と日本語に。その下に 3 行まとめ

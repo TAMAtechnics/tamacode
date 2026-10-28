@@ -13,7 +13,7 @@
 - **ひと区切り**: 返事が終わると「やったこと／確認の仕方／次にやること」の 3 行
 - **迷走検知**: 同じファイルを読みすぎ・同じエラーを繰り返しているときに「迷ってるかも」
 - **雰囲気モード（/kakkoii）**: 琥珀色の HUD（SESSION / TOKENS / FILES / EDITS / ERRORS と直近の道具のログ）と帯の進捗バー。数字は全部実データ
-- Spinner（`Flowing…`）を猫だけに、完了行（`Crunched for 4s`）を「4秒で完了」に
+- Spinner（`Flowing…`）を実況に（猫 ＋ 動作 ＋ 対象 ＋ 目的 ＋ 経過時間）、完了行（`Crunched for 4s`）を「4秒で完了」に
 
 > **注意**: この plugin の中心は Claude Code の **hooks module（function hooks）** という早期アクセス機能です。
 > Claude Code **2.1.285 以前**では環境変数 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` が必要です。**それ以降は不要**です。
@@ -66,6 +66,7 @@ claude plugin install tamacode@tamacode-marketplace
 | `hooks/hooks.json` | フック定義（SessionStart）と hooks module の指定（`modules`） |
 | `hooks/tamacode.tsx` | hooks module の入口。下の各ファイルの `register` をまとめて呼ぶ |
 | `hooks/activity.tsx` | 帯（今やってること・待ってていいか）・許可とエラーの翻訳の表示・3 行まとめ・迷走検知・Spinner |
+| `hooks/live.ts` | Spinner の実況の文（純粋）: 対象の取り方・Bash の動詞・目的の拾い方・幅に合わせた削り方 |
 | `hooks/safety.tsx` | 【7】自動バックアップ ＋ 見張り（止める／警告）を道具の前後に当てる |
 | `hooks/watch.ts` | 見張りの判定（純粋。AI 不使用） |
 | `hooks/permission.ts` / `hooks/errors.ts` | 許可・エラーの翻訳（規則の即答と、モデルの返事の整形） |
@@ -100,6 +101,24 @@ claude plugin install tamacode@tamacode-marketplace
 ```
 
 帯の時間は「最後に動きがあってから」です。Spinner の横の時間（ターン開始から）とは別物なので、固まっているかの判断は帯の数字で。
+
+### Spinner（実況役）
+
+帯は「待っていいか」の判定役、Spinner（オレンジの猫の横）は「いま何を・どうしてるか」の実況役です。形は **猫 ＋ 動作 ＋ 対象 ＋ 目的（分かる範囲で）＋ 経過時間（その動作が始まってから）**。
+
+```
+(=^･q･^=) hooks/activity.tsx を読んで、ロゴの描画位置を探してます（12s）
+(=^･q･^=) 「NOTICE_REF」という言葉をプロジェクト内から探してます（3s）
+ฅ(=^･q･^=)ฅ hooks/activity.tsx を書き換えてます（+14行）（40s）
+ヽ(=^･q･^=)ノ figlet が入ってるか確認するコマンドを実行中（2s）
+(=･q･=)? 次の手を考えてます。まだ何も触ってません（33s）
+(=｡･q･｡=) 返事を書いてます（↓1.8k文字）（20s）
+```
+
+- **対象**は道具の引数から。ファイルはパスの末尾 2 階層。Bash は `description`（日本語の短い説明）があればそれを、無ければ先頭の動詞と対象を日本語に（`cat` → 中身を見る、`grep` → 探す、`npm run build` → ビルド、`git commit` → git にセーブ）
+- **目的**は直前の Claude の発言の最後の文から 1 フレーズ。拾えなければ省略
+- 端末幅に収まらなければ **目的 → 対象** の順に削ります。猫・動作・時間は必ず残ります
+- 英語の道具名（Read / Edit / Bash）は出しません
 
 | 状態 | いつ | 一言 |
 | --- | --- | --- |

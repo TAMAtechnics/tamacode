@@ -85,6 +85,23 @@ export type TamacodeNow = {
   startedAt: number;
   /** 最後に変化があった時刻（tool.call / 結果 / 文字の増加 / ダイアログ表示で更新） */
   at: number;
+  /** スピナー（猫の横）に出す実況。無ければ null（エンジンの mode から仮の文を出す） */
+  live?: TamacodeLive | null;
+};
+
+/**
+ * スピナー（猫の横）の実況。「猫 ＋ 動作 ＋ 対象 ＋ 目的 ＋ 経過時間」のうち、猫と時間は描くときに足す。
+ * 端末幅に収まらなければ long → mid → brief の順に短い方を使う（目的 → 対象 の順に削る）。
+ */
+export type TamacodeLive = {
+  /** 動作＋対象＋目的（直前の発言から拾った 1 フレーズ）。拾えなければ null */
+  long: string | null;
+  /** 動作＋対象 */
+  mid: string;
+  /** 動作だけ（必ず残す） */
+  brief: string;
+  /** 補足（+14行、↓1.8k文字 など）。無ければ null */
+  note: string | null;
 };
 
 /** ひと区切りの 3 行まとめ（やったこと／確認の仕方／次にやること） */
