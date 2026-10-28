@@ -20,7 +20,7 @@
 
 import type { EngineInterface, Register } from "claude-code";
 import type { TamacodeErrorInfo, TamacodeFinding, TamacodeLive, TamacodeLogEntry, TamacodeNotice, TamacodeNow, TamacodePermission, TamacodeRead, TamacodeSummary, TamacodeTerms, TamacodeWander } from "../types/tamacode";
-import { errorGuess, errorLines, errorPrompt, looksLikeError, parseErrorLines, errorHeadline as errorHeadlineLong } from "./errors";
+import { buildErrorInfo, errorPrompt, isToolError, parseWhat } from "./errors";
 import { t } from "./locale";
 import { parsePermission, permissionGuess, permissionLines, permissionPrompt } from "./permission";
 import { EMPTY_STATS, barForNow, getVibeConfig, logLineFor } from "./vibe";
@@ -37,6 +37,7 @@ const SUMMARY = { plugin: "tamacode", key: "summary" } as const;
 const NOTICE = { plugin: "tamacode", key: "notice" } as const;
 const PERMISSION = { plugin: "tamacode", key: "permission" } as const;
 const ERROR_INFO = { plugin: "tamacode", key: "errorInfo" } as const;
+const ERROR_OPEN = { plugin: "tamacode", key: "errorOpen" } as const; // エラーの詳細を [+] で開いているか
 const BUSY = { plugin: "tamacode", key: "isBusy" } as const;
 const RECENT = { plugin: "tamacode", key: "recentFiles" } as const;
 const READS = { plugin: "tamacode", key: "reads" } as const;
@@ -617,11 +618,11 @@ type ToolResultLike = { isError?: true; deny?: string; text?: string; result?: u
 const resultText = (result: ToolResultLike): string =>
   typeof result.text === "string" ? result.text : typeof result.result === "string" ? result.result : "";
 
-// エラーなら同じエラーの回数を数えて返す（エラーでなければ 0）
-async function countError($: Dollar, result: ToolResultLike): Promise<number> {
+// エラーなら同じエラーの回数を数えて返す（エラーでなければ 0）。エラーかどうかは機械的に決める（errors.ts の isToolError）
+async function countError($: Dollar, tool: string, input: Record<string, unknown>, result: ToolResultLike): Promise<number> {
   const text = resultText(result);
-  if (result.isError !== true && !looksLikeError(text)) return 0;
-  const sig = errorSignature(text);
+  if (!isToolError(tool, input, result)) return 0;
+  const sig = errorSignature(text) || `${tool}:${short(String(input.command ?? input.file_path ?? ""), 60)}`;
   if (sig === "") return 0;
   const n = (errors.get(sig) ?? 0) + 1;
   errors.set(sig, n);
@@ -640,42 +641,33 @@ async function readErrorInfo($: Dollar): Promise<TamacodeErrorInfo | null> {
   return v && typeof v === "object" && Array.isArray(v.lines) ? v : null;
 }
 
-// 規則で即答して帯に出し、裏で軽いモデルに 3 行で言い直してもらう。同じエラーが 3 回続いたら「詰まってます」
-async function explainError($: Dollar, text: string, tool: string, sameCount: number, at: number): Promise<void> {
-  if (sameCount >= ERROR_LIMIT) {
-    await $.state.set(ERROR_INFO, { at, tool, lines: [t("error.stuck")], mode: "stuck", sameCount, isLoading: false } satisfies TamacodeErrorInfo);
-    return;
-  }
-  const guess = errorGuess(text, tool);
-  await $.state.set(ERROR_INFO, { at, tool, lines: errorLines(guess), mode: "lines", sameCount, isLoading: true } satisfies TamacodeErrorInfo);
-  const prompt = errorPrompt(text, tool, guess);
+// 機械的に分類して帯に出す。「それ以外」のときだけ、裏で軽いモデルに「何が起きた」を 1 行で言い直してもらう。
+// 同じエラーが 3 回続いたら「同じ所で3回詰まってます」
+async function explainError($: Dollar, text: string, tool: string, input: Record<string, unknown>, sameCount: number, at: number): Promise<void> {
+  const info = buildErrorInfo({ at, tool, input, text, sameCount });
+  await Promise.all([$.state.set(ERROR_INFO, info), $.state.set(ERROR_OPEN, false)]);
+  if (!info.isLoading) return;
+  const prompt = errorPrompt(text, info.where);
   $.clock.after(0, () => {
     void (async () => {
-      let refined = null as ReturnType<typeof parseErrorLines>;
-      let failed = false;
+      let what: string | null = null;
       try {
         const r = await $.model.complete({
           model: SUMMARY_MODEL,
           system: "あなたは、プログラムを知らない人に向けて、コンピュータのエラーをやさしい日本語で説明する係です。",
           prompt,
           effort: "low",
-          maxTokens: 300,
+          maxTokens: 200,
           timeoutMs: 15000,
         });
-        if (r.isAnswered) refined = parseErrorLines(r.text);
-        else failed = true;
+        if (r.isAnswered) what = parseWhat(r.text);
       } catch (err) {
-        failed = true;
         $.ui.log(`エラーの言い直しに失敗: ${String(err)}`, { to: "debug" });
       }
       const cur = await readErrorInfo($);
       if (cur === null || cur.at !== at || !cur.isLoading) return; // もう別のエラー・消えた・「詰まってます」に変わった
-      if (failed) {
-        const head = errorHeadlineLong(text);
-        await $.state.set(ERROR_INFO, { ...cur, lines: [head === "" ? t("error.what.unknown", { tool }) : head, t("error.rawStuck")], mode: "raw", isLoading: false });
-      } else {
-        await $.state.set(ERROR_INFO, { ...cur, lines: refined !== null ? errorLines(refined) : cur.lines, isLoading: false });
-      }
+      const lines = what === null ? cur.lines : cur.lines.map((l, i) => (i === 1 ? `${t("error.label.what")}: ${what}` : l));
+      await $.state.set(ERROR_INFO, { ...cur, lines, isLoading: false });
       $.ui.invalidate("ui.render");
     })();
   });
@@ -992,7 +984,9 @@ export const register: Register = (on) => {
 
     const result = await next(e);
     const r = result as ToolResultLike;
-    if (r.isError === true) {
+    const input0 = like as unknown as Record<string, unknown>;
+    const isErr = isToolError(like.tool, input0, r);
+    if (isErr) {
       try {
         await updateVibeStats($, (s) => ({ ...s, errors: s.errors + 1 }));
       } catch (err) {
@@ -1005,7 +999,7 @@ export const register: Register = (on) => {
       if (r.deny !== undefined) {
         const stoppedText = t("band.stopped", { reason: short(r.deny, 50) });
         await setNow($, { phase: "between", face: CAT.stopped, text: stoppedText, tool: like.tool, isLong: false, live: liveOne(stoppedText, "止めました") }, { log: true });
-      } else if (r.isError === true) {
+      } else if (isErr) {
         const head = errorHeadline(resultText(r));
         const errorText = t("band.error", { head: head === "" ? "" : `: ${head}` });
         await setNow($, { phase: "between", face: CAT.error, text: errorText, tool: like.tool, isLong: false, live: liveOne(errorText, "エラーが出ました") }, { log: true });
@@ -1016,10 +1010,10 @@ export const register: Register = (on) => {
       $.ui.log(`結果の表示に失敗: ${String(err)}`, { to: "debug" });
     }
 
-    const sameCount = await countError($, r);
+    const sameCount = await countError($, like.tool, input0, r);
     if (sameCount > 0) {
       try {
-        await explainError($, resultText(r), like.tool, sameCount, at);
+        await explainError($, resultText(r), like.tool, input0, sameCount, at);
       } catch (err) {
         $.ui.log(`エラー翻訳に失敗: ${String(err)}`, { to: "debug" });
       }
@@ -1043,7 +1037,8 @@ export const register: Register = (on) => {
 
   // 入力欄の上の帯: 今やってること＋待ってていいか（1 行、上書き。あなたの番なら黄色）＋ 迷走の注意
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
-    const [now, wGot, nGot, perm, errInfo, bGot, wsGot, enabledGot, vibeGot, clock] = await Promise.all([readNow($), $.state.get(WANDER), $.state.get(NOTICE), readPermission($), readErrorInfo($), $.state.get(WATCH_BLOCK), $.state.get(WATCH_WARNINGS), $.state.get(BAND_ENABLED), $.state.get(VIBE_ON), $.clock.now()]);
+    const [now, wGot, nGot, perm, errInfo, bGot, wsGot, enabledGot, vibeGot, clock, errOpenGot] = await Promise.all([readNow($), $.state.get(WANDER), $.state.get(NOTICE), readPermission($), readErrorInfo($), $.state.get(WATCH_BLOCK), $.state.get(WATCH_WARNINGS), $.state.get(BAND_ENABLED), $.state.get(VIBE_ON), $.clock.now(), $.state.get(ERROR_OPEN)]);
+    const errOpen = errOpenGot.value === true;
     // 雰囲気モード: 進捗バー（書き出し中はこのターンの出力トークン、道具の実行中は経過秒。実データ）
     const vibeBar = vibeGot.value === true && e.props.isWorking ? barForNow(now, await readVibeStats($), clock) : null;
     // /tama で帯をオフにしているときは、見張りが止めた物だけ出す（安全のため）
@@ -1147,12 +1142,33 @@ export const register: Register = (on) => {
         ) : null}
         {errShown !== null ? (
           <Box flexDirection="column" paddingLeft={2}>
-            {errShown.lines.map((l) => (
-              <Text color={errShown.mode === "stuck" ? "yellow" : undefined} bold={errShown.mode === "stuck"} dimColor={errShown.mode === "raw"} wrap="truncate-end">
+            {errShown.lines.map((l, i) => (
+              <Text color={errShown.kind === "stuck" ? "yellow" : i === 0 ? "red" : undefined} bold={errShown.kind === "stuck" || i === 0} wrap="wrap">
                 {l}
               </Text>
             ))}
-            {errShown.isLoading ? <Text dimColor>{t("error.loading")}</Text> : null}
+            {errShown.details.length > 0 ? (
+              <Box>
+                <Button
+                  plain
+                  key="error:toggle"
+                  label={errOpen ? t("error.less") : t("error.more")}
+                  onPress={() => {
+                    void $.state.set(ERROR_OPEN, !errOpen);
+                  }}
+                />
+                {errShown.isLoading ? <Text dimColor>　{t("error.loading")}</Text> : null}
+              </Box>
+            ) : errShown.isLoading ? (
+              <Text dimColor>{t("error.loading")}</Text>
+            ) : null}
+            {errOpen
+              ? errShown.details.map((d) => (
+                  <Text dimColor wrap="wrap">
+                    　{d}
+                  </Text>
+                ))
+              : null}
           </Box>
         ) : null}
         {w !== null ? (

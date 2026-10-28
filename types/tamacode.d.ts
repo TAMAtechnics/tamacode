@@ -164,19 +164,23 @@ export type TamacodePermission = {
   isLoading: boolean;
 };
 
-/** エラー翻訳（帯に出す 3 行） */
+/** エラー翻訳（帯に出す物。1 行目は必ず「⚠ どこで」） */
 export type TamacodeErrorInfo = {
   /** 出た時刻（エポックミリ秒） */
   at: number;
   /** 失敗した道具 */
   tool: string;
-  /** 何が起きた／Claudeが直せるか／あなたがやること（ラベル付き）。詰まりなら 1 行、モデル失敗なら生の 1 行＋詰まってます */
+  /** 「⚠ どこで」の行（失敗した道具と対象） */
+  where: string;
+  /** self: Claude が直せる（1 行だけ） / you: あなたの作業が必要（4 種類） / other: それ以外 / stuck: 同じ所で 3 回 */
+  kind: "self" | "you" | "other" | "stuck";
+  /** 帯に出す行（3 行以内。折り返して出す） */
   lines: string[];
-  /** lines: 3 行の説明 / stuck: 同じエラーが続いている / raw: モデルが失敗して生の 1 行 */
-  mode: "lines" | "stuck" | "raw";
+  /** [+] で開く詳細（生のエラーの見出し）。無ければ [] */
+  details: string[];
   /** 同じエラーが続いた回数 */
   sameCount: number;
-  /** モデルの言い直しを待っているか */
+  /** モデルの言い直し（何が起きた）を待っているか */
   isLoading: boolean;
 };
 
@@ -322,6 +326,8 @@ declare module 'claude-code' {
       permission: TamacodePermission | null;
       /** エラー翻訳。直近の道具がエラーでなければ null */
       errorInfo: TamacodeErrorInfo | null;
+      /** エラーの詳細を [+] で開いているか */
+      errorOpen: boolean;
       /** Claude が作業中か（操作盤のボタンを無効にする） */
       isBusy: boolean;
       /** 直近に Read / Edit したファイル（絶対パス、新しい順、最大 10 件） */
