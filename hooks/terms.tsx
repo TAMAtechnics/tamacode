@@ -6,6 +6,7 @@
 // 辞書は2つ:
 //   - 組み込み辞書（このファイルの BUILTIN）
 //   - 自分の辞書（~/.claude/tamacode-terms.json）。/terms add で育てる。手で編集してもよい。
+// 描画は pane.tsx（「たま」ペインの「用語」タブ）。ここは辞書・抽出・コマンドだけ。
 //     形: { "terms": { "用語": "説明" }, "known": ["もう知ってる用語"] }
 //     "known" に入れた用語は表示しない（/terms know で入れる）。自分の辞書は組み込みより優先。
 //
@@ -19,9 +20,10 @@ type Entry = { term: string; aliases: string[]; meaning: string; isUser: boolean
 type UserFile = { terms: Record<string, string>; known: string[] };
 
 const TERMS = { plugin: "tamacode", key: "terms" } as const;
+const PANE_TAB = { plugin: "tamacode", key: "paneTab" } as const; // 「たま」ペインのタブ（描画は pane.tsx）
 
-const PANE_ID = "terms";
-const USER_FILE = ".claude/tamacode-terms.json"; // HOME からの相対
+const PANE_ID = "tama";
+export const USER_FILE = ".claude/tamacode-terms.json"; // HOME からの相対
 const MAX_FOUND = 40;
 const MAX_TEXT_CHARS = 60000;
 const MAX_OUTPUT_CHARS = 4000; // ツール出力 1 回ぶんから用語ペインに渡す上限
@@ -285,14 +287,19 @@ async function loadUserFile($: Dollar): Promise<UserFile> {
   }
 }
 
-async function saveUserFile($: Dollar, user: UserFile): Promise<string | null> {
-  const path = await userFilePath($);
-  if (path === null) return null;
+// 辞書ファイルに書く形（語順をそろえる）
+export function serializeUser(user: UserFile): string {
   const sorted: UserFile = {
     terms: Object.fromEntries(Object.entries(user.terms).sort(([a], [b]) => a.localeCompare(b, "ja"))),
     known: Array.from(new Set(user.known)).sort((a, b) => a.localeCompare(b, "ja")),
   };
-  await $.fs.write(path, JSON.stringify(sorted, null, 2) + "\n");
+  return JSON.stringify(sorted, null, 2) + "\n";
+}
+
+async function saveUserFile($: Dollar, user: UserFile): Promise<string | null> {
+  const path = await userFilePath($);
+  if (path === null) return null;
+  await $.fs.write(path, serializeUser(user));
   return path;
 }
 
@@ -337,11 +344,19 @@ const refresh = () => {
   known = new Set(user.known.map((k) => k.toLowerCase()));
 };
 
+// pane.tsx（「知ってる」ボタン）が自分の辞書を差し替えるための入口。$ は渡さない（validate が拒むため、ファイル I/O は呼ぶ側が行う）
+export const getUser = (): UserFile => user;
+export const setUser = (next: UserFile): void => {
+  user = next;
+  refresh();
+};
+
 // 今の辞書で、返事とこのターンのツール出力から用語を拾う。返事の語が先、ツール出力だけに出た語が後
 export function buildTerms(answer: string, outputs: string[], at: number): TamacodeTerms {
   const fromAnswer = findTerms(answer, entries, known, "answer");
   const seen = new Set(fromAnswer.map((t) => t.term));
-  const fromTool = findTerms(outputs.join("\n"), entries, known, "tool").filter((t) => !seen.has(t.term));
+  // ツール出力は新しい物が上に来るよう、後ろから並べる
+  const fromTool = findTerms([...outputs].reverse().join("\n"), entries, known, "tool").filter((t) => !seen.has(t.term));
   return { at, answer, outputs, found: [...fromAnswer, ...fromTool].slice(0, MAX_FOUND) };
 }
 
@@ -360,7 +375,7 @@ async function applyUser($: Dollar, next: UserFile): Promise<string | null> {
   return saved;
 }
 
-const withKnown = (term: string): UserFile => ({ ...user, known: Array.from(new Set([...user.known, term])) });
+export const withKnown = (term: string): UserFile => ({ ...user, known: Array.from(new Set([...user.known, term])) });
 
 // 起動時: 辞書ファイルを読み、/terms を登録、ペインを（広ければ）出す
 async function onSessionStart($: Dollar): Promise<void> {
@@ -378,7 +393,7 @@ async function onSessionStart($: Dollar): Promise<void> {
   }
   // 画面が広ければ勝手に右側へ出る。狭ければ /terms で開く（isPlaced: false ですぐ返るので待っても止まらない）。
   try {
-    await $.ui.open({ id: PANE_ID, title: "用語", columns: 48 });
+    await $.ui.open({ id: PANE_ID, title: "たま", columns: 48 });
   } catch (err) {
     $.ui.log(`用語ペインを開けません: ${String(err)}`, { to: "debug" });
   }
@@ -412,11 +427,12 @@ export const register: Register = (on) => {
     void restParts;
 
     if (sub === "") {
-      const opened = await $.ui.open({ id: PANE_ID, title: "用語", focus: true, closeOnEscape: true, columns: 48, rows: 24 });
+      await $.state.set(PANE_TAB, "terms");
+      const opened = await $.ui.open({ id: PANE_ID, title: "たま", focus: true, closeOnEscape: true, columns: 48, rows: 24 });
       const cur = await readTerms($);
       const n = cur?.found.length ?? 0;
-      if (!opened.isPlaced) return { text: `📘 用語ペインは待機中です: ${opened.reason}` };
-      return { text: `📘 用語ペインを開きました（直近の返事から ${n} 語）。Esc で閉じます` };
+      if (!opened.isPlaced) return { text: `📘 用語タブは待機中です: ${opened.reason}` };
+      return { text: `📘 用語タブを開きました（直近の返事から ${n} 語）。Esc で閉じます` };
     }
 
     if (sub === "help" || sub === "?") return { text: HELP };
@@ -469,52 +485,5 @@ export const register: Register = (on) => {
       return { text: `辞書の保存に失敗しました: ${String(err)}` };
     }
     return { text: `${done}${saved === null ? "（HOME が未設定なのでファイルには保存できませんでした）" : ""}` };
-  });
-
-  on("ui.render", { component: "Pane", requestId: PANE_ID }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e);
-    const cur = await readTerms($);
-    const found = cur?.found ?? [];
-
-    return (
-      <Box flexDirection="column" paddingX={1}>
-        <Text bold>📘 用語（直近の返事と、ツールのエラー出力から）</Text>
-        <Text dimColor>知ってる語は「知ってる」を押すと次から出ません。/terms add で辞書を育てられます</Text>
-        {cur === null ? (
-          <Box marginTop={1}>
-            <Text dimColor>Claude の返事やツールのエラーが出ると、ここに専門用語の説明が並びます。</Text>
-          </Box>
-        ) : found.length === 0 ? (
-          <Box marginTop={1}>
-            <Text dimColor>この返事に、辞書にある専門用語はありませんでした。</Text>
-          </Box>
-        ) : (
-          found.map((t) => (
-            <Box flexDirection="column" marginTop={1}>
-              <Box>
-                <Text bold>{t.term}</Text>
-                {t.isUser ? <Text dimColor>　自分の辞書</Text> : null}
-                {t.from === "tool" ? <Text dimColor>　ツールの出力から</Text> : null}
-              </Box>
-              <Box paddingLeft={2}>
-                <Text wrap="wrap">{t.meaning}</Text>
-              </Box>
-              <Box paddingLeft={2}>
-                <Button
-                  plain
-                  key={`know:${t.term}`}
-                  label="知ってる（次から出さない）"
-                  onPress={() => {
-                    void applyUser($, withKnown(t.term)).catch((err) => {
-                      $.ui.log(`「知ってる」の保存に失敗（${t.term}）: ${String(err)}`, { to: "debug" });
-                    });
-                  }}
-                />
-              </Box>
-            </Box>
-          ))
-        )}
-      </Box>
-    );
   });
 };

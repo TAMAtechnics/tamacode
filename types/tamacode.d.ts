@@ -87,6 +87,20 @@ export type TamacodeNow = {
   at: number;
 };
 
+/** ひと区切りの 3 行まとめ（やったこと／確認の仕方／次にやること） */
+export type TamacodeSummary = {
+  /** まとめたターンの id */
+  turnId: string;
+  /** そのターンの長さ（ミリ秒）。完了行（TurnDuration）と突き合わせる鍵 */
+  durationMs: number;
+  /** 頼んだ時刻（エポックミリ秒） */
+  at: number;
+  /** 3 行（ラベル付き）。まだ無い／作れなかったときは null */
+  lines: string[] | null;
+  /** モデルに頼んでいる最中か */
+  isLoading: boolean;
+};
+
 /** /log ペインに並べる1行 */
 export type TamacodeLogEntry = {
   /** 最後にこの行を出した時刻（エポックミリ秒） */
@@ -106,6 +120,12 @@ declare module 'claude-code' {
       openId: string | null;
       /** 直近の返事から拾った用語。返事がまだ無ければ null */
       terms: TamacodeTerms | null;
+      /** 用語タブで説明を開いているか */
+      termsOpen: boolean;
+      /** 「たま」ペインで開いているタブ */
+      paneTab: "terms" | "changes" | "log";
+      /** 直近のターンの 3 行まとめ。無ければ null */
+      summary: TamacodeSummary | null;
       /** 迷走検知。何も無ければ null */
       wander: TamacodeWander | null;
       /** 今やってること。ターンが終わると null */

@@ -2,8 +2,7 @@
 //
 // Edit / Write / MultiEdit の tool.call を捕まえて、ファイル名と変更前後の文字を取り、
 // 軽いモデル（haiku）に「プログラムを知らない人向け」の日本語2文要約を頼む。
-// /changes でペインを開くと、新しい順に「時刻・ファイル名・要約・＋n行 −n行」を並べ、
-// 1件を選ぶ（Tab/矢印 + Enter、またはクリック）と元の差分（Code 部品）が開く。
+// /changes で「たま」ペインの「変更」タブを開くと、新しい順に「時刻・ファイル名・要約・＋n行 −n行」が並ぶ（描画は pane.tsx）。
 //
 // 保存: 表示用は $.state（ホットリロードまで残る）、再起動対策は $.store（セッションをまたいで残る）。
 // 起動時に $.store から読み戻して $.state に載せる。50件を超えたら古いものから消す。
@@ -29,9 +28,9 @@ type Op = { kind: " " | "+" | "-"; text: string };
 
 // $.state の参照。plugin と key はリテラルでないと validate が読めない。
 const CHANGES = { plugin: "tamacode", key: "changes" } as const;
-const OPEN_ID = { plugin: "tamacode", key: "openId" } as const;
+const PANE_TAB = { plugin: "tamacode", key: "paneTab" } as const; // 「たま」ペインのタブ（描画は pane.tsx）
 
-const PANE_ID = "changes";
+const PANE_ID = "tama";
 const STORE_KEY = "changes";
 const LIMIT = 50;
 const MAX_DIFF_CHARS = 9000; // Code 部品の上限は 10000 文字
@@ -40,8 +39,8 @@ const MAX_LCS_CELLS = 1500 * 1500; // これより大きい差分は LCS を諦�
 const CONTEXT_LINES = 3;
 const SUMMARY_MODEL = "haiku";
 const SUMMARY_DIFF_CHARS = 3000;
-const RISK_NOTE = "※壊れると困る所です。不安なら戻してと言ってください";
-const RISK_FACE = "(=｀･q･´=)ﾉ"; // 危ない操作の猫（activity.tsx の CAT.danger と同じ顔）
+export const RISK_NOTE = "※壊れると困る所です。不安なら戻してと言ってください";
+export const RISK_FACE = "(=｀･q･´=)ﾉ"; // 危ない操作の猫（activity.tsx の CAT.danger と同じ顔）
 
 // 危険判定: パスと変更行（+/-）に対して当てる
 const RISK_PATH_RULES: RegExp[] = [/(^|[\\/])\.env(\.|$)/i];
@@ -58,13 +57,6 @@ const RISK_TEXT_RULES: RegExp[] = [
 const basename = (p: string): string => {
   const parts = String(p).split(/[\\/]/).filter(Boolean);
   return parts.length > 0 ? parts[parts.length - 1]! : String(p);
-};
-
-const pad2 = (n: number): string => String(n).padStart(2, "0");
-
-const hhmm = (ms: number): string => {
-  const d = new Date(ms);
-  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 };
 
 // Code 部品はタブと改行以外の制御文字を受け付けないので落とす
@@ -422,71 +414,13 @@ export const register: Register = (on) => {
     return result;
   });
 
-  // /changes: ペインを開く
-  on("command.run", { command: "changes" }, async ($, e) => {
+  // /changes: 「たま」ペインの「変更」タブを開く
+  on("command.run", { command: "changes" }, async ($) => {
     await ensureLoaded($);
     const { list } = await readChanges($);
-    const opened = await $.ui.open({
-      id: PANE_ID,
-      title: "変更履歴",
-      focus: true,
-      closeOnEscape: true,
-      columns: 64,
-      rows: 24,
-    });
-    if (!opened.isPlaced) return { text: `📜 変更履歴（${list.length}件）は待機中です: ${opened.reason}` };
-    return { text: `📜 変更履歴ペインを開きました（${list.length}件）。Esc で閉じます` };
-  });
-
-  // ペインの描画
-  on("ui.render", { component: "Pane", requestId: PANE_ID }, async ($, e) => {
-    const { Box, Text, Button, Code } = $.ui.resolve(e);
-    const [{ list }, open] = await Promise.all([readChanges($), $.state.get(OPEN_ID)]);
-    const openId = typeof open.value === "string" ? open.value : null;
-
-    return (
-      <Box flexDirection="column" paddingX={1}>
-        <Text bold>📜 変更履歴（新しい順・最大{LIMIT}件）</Text>
-        <Text dimColor>Tab や矢印で選んで Enter を押すと差分を開閉。Esc で閉じる</Text>
-        {list.length === 0 ? (
-          <Box marginTop={1}>
-            <Text dimColor>まだ変更はありません。</Text>
-          </Box>
-        ) : (
-          list.map((c) => {
-            const isOpen = openId === c.id;
-            const label = `${c.isRisky ? `${RISK_FACE} ` : ""}${isOpen ? "▾" : "▸"} ${hhmm(c.at)}  ${c.name}  +${c.added}行 −${c.removed}行`;
-            const summary = c.summary === null ? (c.isRisky ? RISK_NOTE : "") : `${c.summary}${c.isRisky ? ` ${RISK_NOTE}` : ""}`;
-            return (
-              <Box flexDirection="column" marginTop={1}>
-                <Button
-                  plain
-                  key={`row:${c.id}`}
-                  label={label}
-                  onPress={() => {
-                    void $.state.set(OPEN_ID, isOpen ? null : c.id);
-                  }}
-                />
-                {summary !== "" ? (
-                  <Box paddingLeft={2}>
-                    <Text wrap="wrap">{summary}</Text>
-                  </Box>
-                ) : null}
-                {isOpen ? (
-                  <Box flexDirection="column" paddingLeft={2} marginTop={1}>
-                    {c.diff === "" ? (
-                      <Text dimColor>（中身に変化はありませんでした）</Text>
-                    ) : (
-                      <Code source={c.diff} format="diff" path={c.file} />
-                    )}
-                    {c.isTruncated ? <Text dimColor>…長いので途中まで表示しています</Text> : null}
-                  </Box>
-                ) : null}
-              </Box>
-            );
-          })
-        )}
-      </Box>
-    );
+    await $.state.set(PANE_TAB, "changes");
+    const opened = await $.ui.open({ id: PANE_ID, title: "たま", focus: true, closeOnEscape: true, columns: 64, rows: 24 });
+    if (!opened.isPlaced) return { text: `📜 変更（${list.length}件）は待機中です: ${opened.reason}` };
+    return { text: `📜 変更タブを開きました（${list.length}件）。Esc で閉じます` };
   });
 };

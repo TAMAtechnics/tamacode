@@ -54,13 +54,13 @@ const answer = ($: Engine, text: string, extra: Record<string, unknown> = {}) =>
   $.turn.complete({ answer: text, reason: "answer", durationMs: 1000, isAborted: false, turnId: "t1", ...extra } as any);
 
 const mountPane = ($: Engine) =>
-  $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "Pane", requestId: "terms", props: PANE_PROPS });
+  $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "Pane", requestId: "tama", props: PANE_PROPS });
 
-// ペインに並んでいる用語名（太字の Text）だけを順に取り出す
+// ペインに並んでいる用語名（語のボタン）だけを順に取り出す
 const terms = async (ui: Awaited<ReturnType<typeof mountPane>>) =>
-  (await ui.findAll({ type: "Text" }))
-    .filter((t) => t.props.bold === true && !t.text.startsWith("📘"))
-    .map((t) => t.text);
+  (await ui.findAll({ type: "Button" }))
+    .filter((b) => String((b.props as any).key ?? "").startsWith("know:"))
+    .map((b) => String((b.props as any).label));
 
 test("返事に出た専門用語を、出てきた順に一言説明つきで並べる", async ($, on) => {
   setup(on);
@@ -69,7 +69,11 @@ test("返事に出た専門用語を、出てきた順に一言説明つきで�
 
   const ui = await mountPane($);
   expect(await terms(ui)).toEqual(["環境変数", "ビルド", "本番環境", "デプロイ", "マイグレーション"]);
-  expect(await ui.find({ type: "Text", text: "作ったものを本番のサーバーに置いて、みんなが使える状態にすること。" })).toBeDefined();
+  const hasMeaning = async () => (await ui.findAll({ type: "Text" })).some((t) => t.text.includes("作ったものを本番のサーバーに置いて"));
+  expect(await hasMeaning()).toBe(true);
+  // 「説明を開く」で説明が折り返し表示になる（折りたたみでも開いても説明は読める）
+  await ui.press({ key: "terms:toggle" });
+  expect(await hasMeaning()).toBe(true);
 });
 
 test("英語表記（deploy / .env）でも拾い、単語の一部（deployed の中など）には反応しない", async ($, on) => {
@@ -103,7 +107,7 @@ test("サブエージェントの返事や、途中で止まった返事は見�
   await answer($, "デプロイしました", { agentId: "agent-1" });
   await answer($, "デプロイしました", { reason: "aborted", isAborted: true });
   const ui = await mountPane($);
-  expect(await ui.find({ type: "Text", text: /ここに専門用語の説明が並びます/ })).toBeDefined();
+  expect(await ui.find({ type: "Text", text: /ここに専門用語が並びます/ })).toBeDefined();
 });
 
 test("専門用語が無い返事なら、その旨だけ出る", async ($, on) => {
@@ -122,8 +126,8 @@ test("自分の辞書（ファイル）は組み込みより優先され、known
   await answer($, "ビルドしてデプロイしました。たまコードも更新。");
   const ui = await mountPane($);
   expect(await terms(ui)).toEqual(["デプロイ", "たまコード"]);
-  expect(await ui.find({ type: "Text", text: "うちでは「公開」のこと。" })).toBeDefined();
-  expect(await ui.find({ type: "Text", text: "　自分の辞書" })).toBeDefined();
+  expect((await ui.findAll({ type: "Text" })).some((t) => t.text.includes("うちでは「公開」のこと。"))).toBe(true);
+  expect(await ui.find({ type: "Text", text: "†" })).toBeDefined();
 });
 
 test("辞書ファイルが壊れていても止まらず、組み込み辞書で動く", async ($, on) => {
@@ -150,7 +154,7 @@ test("/terms add で辞書に足すとファイルに保存され、直近の返
 
   // 開いているペインにもすぐ反映される
   expect(await terms(ui)).toEqual(["ペイン"]);
-  expect(await ui.find({ type: "Text", text: "画面の右側に出る小窓のこと" })).toBeDefined();
+  expect((await ui.findAll({ type: "Text" })).some((t) => t.text.includes("画面の右側に出る小窓のこと"))).toBe(true);
 });
 
 test("/terms add は「用語: 説明」の形でも受け付ける", async ($, on) => {
@@ -176,14 +180,15 @@ test("/terms know で「知ってる」にすると次から出ず、unknow で�
   expect(await terms(ui)).toEqual(["ビルド", "デプロイ"]);
 });
 
-test("ペインの「知ってる」ボタンでも消える", async ($, on) => {
+test("ペインで語を押すと「知ってる」になって消える", async ($, on) => {
   const writes: Array<{ path: string; text: string }> = [];
-  setup(on, { writes });
+  const clock = setup(on, { writes });
   await start($);
   await answer($, "ビルドしてデプロイしました。");
 
   const ui = await mountPane($);
   await ui.press({ key: "know:ビルド" });
+  await clock.settle(); // 語のボタンは /terms know を呼ぶので、その処理が終わるまで待つ
   expect(await terms(ui)).toEqual(["デプロイ"]);
   expect(JSON.parse(writes[writes.length - 1]!.text).known).toEqual(["ビルド"]);
 });
@@ -205,7 +210,7 @@ test("/terms rm と list と file", async ($, on) => {
 test("/terms だけならペインを開く。知らない指示なら使い方を出す", async ($, on) => {
   setup(on);
   await start($);
-  expect((await $.command.run({ command: "terms", args: "", ...RUN })).text).toBe("📘 用語ペインを開きました（直近の返事から 0 語）。Esc で閉じます");
+  expect((await $.command.run({ command: "terms", args: "", ...RUN })).text).toBe("📘 用語タブを開きました（直近の返事から 0 語）。Esc で閉じます");
   expect(((await $.command.run({ command: "terms", args: "foo", ...RUN })).text ?? "").startsWith("「foo」は知らない指示です。")).toBe(true);
 });
 
@@ -220,7 +225,7 @@ test("HOME が無くても落ちず、辞書はその場限りで使える", asy
   expect(await terms(await mountPane($))).toEqual(["ペイン"]);
 });
 
-test("ツールの出力（エラー文）に出た用語も拾う。返事の語が先、ツール出力の語が後。次のターンで忘れる", async ($, on) => {
+test("ツールの出力（エラー文）に出た用語も拾う。返事の語が先、ツール出力は新しい物が上。次のターンで忘れる", async ($, on) => {
   setup(on);
   on("session.cwd", () => ({ value: "/proj" }));
   on("ui.render", { component: "AbovePrompt" }, ($, e) => {
@@ -243,18 +248,18 @@ test("ツールの出力（エラー文）に出た用語も拾う。返事の�
   await $.tool.call({ tool: "Bash", command: "npm test" });
   let ui = await mountPane($);
   expect(await terms(ui)).toEqual(["npm", "マイグレーション", "ORM", "スキーマ"]);
-  expect(await ui.find({ type: "Text", text: "　ツールの出力から" })).toBeDefined();
+  expect(await ui.find({ type: "Text", text: "＊" })).toBeDefined();
   await ui.unmount();
 
   await $.tool.call({ tool: "Bash", command: "npm run build" });
   ui = await mountPane($);
   // Warning の行から「トークン」は拾うが、普通の行の「ビルド」は拾わない
-  expect(await terms(ui)).toEqual(["npm", "マイグレーション", "ORM", "スキーマ", "トークン"]);
+  expect(await terms(ui)).toEqual(["トークン", "npm", "マイグレーション", "ORM", "スキーマ"]);
   await ui.unmount();
 
   await answer($, "マイグレーションを直してデプロイしました。");
   ui = await mountPane($);
-  expect(await terms(ui)).toEqual(["マイグレーション", "デプロイ", "npm", "ORM", "スキーマ", "トークン"]);
+  expect(await terms(ui)).toEqual(["マイグレーション", "デプロイ", "トークン", "npm", "ORM", "スキーマ"]);
   await ui.unmount();
 
   await $.turn.start({ text: "次", turnId: "t2" });

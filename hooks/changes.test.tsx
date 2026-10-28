@@ -13,6 +13,7 @@ const PANE_PROPS = {
   view: {},
 } as any;
 const SAMPLE_FILE = "const a = 1;\nconst b = 2;\nconst c = 3;\n";
+const RUN = { origin: { kind: "composer" }, presentation: { isFullscreen: true, columns: 120 } } as const;
 
 type SetupOptions = {
   summary?: string | "fail";
@@ -54,8 +55,15 @@ function setup(on: On, opts: SetupOptions = {}) {
   return clock;
 }
 
-const mountPane = ($: Engine) =>
-  $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "Pane", requestId: "changes", props: PANE_PROPS });
+// 変更の行（タブのボタンは除く）
+const rowsOf = async (ui: { findAll: (q: any) => Promise<any[]> }) =>
+  (await ui.findAll({ type: "Button" })).filter((b: any) => String(b.props?.key ?? b.key ?? "").startsWith("row:"));
+
+// /changes で「変更」タブにしてから「たま」ペインを描く
+const mountPane = async ($: Engine) => {
+  await $.command.run({ command: "changes", args: "", ...RUN });
+  return $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "Pane", requestId: "tama", props: PANE_PROPS });
+};
 
 test("Edit を記録して、時刻・ファイル名・要約・行数が出る", async ($, on) => {
   const clock = setup(on);
@@ -63,7 +71,7 @@ test("Edit を記録して、時刻・ファイル名・要約・行数が出る
   await clock.settle();
 
   const ui = await mountPane($);
-  const rows = await ui.findAll({ type: "Button" });
+  const rows = await rowsOf(ui);
   expect(rows).toHaveLength(1);
   expect(rows[0]!.text).toMatch(/^▸ \d\d:\d\d  api\.ts  \+1行 −1行$/);
   expect(await ui.find({ type: "Text", text: "数字をひとつ直しました。画面に出る値が変わります。" })).toBeDefined();
@@ -76,11 +84,12 @@ test("要約が失敗しても、ファイル名と行数だけで止まらな�
   await clock.settle();
 
   const ui = await mountPane($);
-  const rows = await ui.findAll({ type: "Button" });
+  const rows = await rowsOf(ui);
   expect(rows).toHaveLength(1);
   expect(rows[0]!.text).toMatch(/api\.ts  \+1行 −1行$/);
-  // 見出し2行だけで、要約の行は出ない
-  expect(await ui.findAll({ type: "Text" })).toHaveLength(2);
+  // 要約の行は出ない（見出しと注意書きだけ）
+  const texts = (await ui.findAll({ type: "Text" })).map((t) => t.text);
+  expect(texts.filter((t) => !t.startsWith("📜") && !t.startsWith("押すと") && !t.startsWith("　"))).toHaveLength(0);
 });
 
 test("壊れると困る所（.env）には危ない操作の猫と注意書きが付く", async ($, on) => {
@@ -89,7 +98,7 @@ test("壊れると困る所（.env）には危ない操作の猫と注意書き�
   await clock.settle();
 
   const ui = await mountPane($);
-  const rows = await ui.findAll({ type: "Button" });
+  const rows = await rowsOf(ui);
   expect(rows).toHaveLength(1);
   expect(rows[0]!.text.startsWith("(=｀･q･´=)ﾉ ")).toBe(true);
   expect(rows[0]!.text).toMatch(/\.env  \+1行 −0行$/);
@@ -104,7 +113,7 @@ test("ふつうのファイルには危ない操作の猫が付かない", async
   await clock.settle();
 
   const ui = await mountPane($);
-  const rows = await ui.findAll({ type: "Button" });
+  const rows = await rowsOf(ui);
   expect(rows[0]!.text.startsWith("▸")).toBe(true);
   expect(await ui.find({ type: "Text", text: /※壊れると困る所です/ })).toBeUndefined();
 });
@@ -115,14 +124,14 @@ test("1件を選ぶと元の差分（Code 部品）が開き、もう一度で�
   await clock.settle();
 
   const ui = await mountPane($);
-  const row = (await ui.findAll({ type: "Button" }))[0]!;
+  const row = (await rowsOf(ui))[0]!;
   await ui.press({ key: row.key! });
 
   const code = await ui.find({ type: "Code" });
   expect(code).toBeDefined();
   expect(code!.props.format).toBe("diff");
   expect(code!.props.source).toBe("@@ -1,3 +1,3 @@\n const a = 1;\n-const b = 2;\n+const b = 20;\n const c = 3;\n");
-  expect((await ui.findAll({ type: "Button" }))[0]!.text.startsWith("▾")).toBe(true);
+  expect((await rowsOf(ui))[0]!.text.startsWith("▾")).toBe(true);
 
   await ui.press({ key: row.key! });
   expect(await ui.find({ type: "Code" })).toBeUndefined();
@@ -137,7 +146,7 @@ test("新しい順に並び、50件を超えたら古いものから消える", 
   await clock.settle();
 
   const ui = await mountPane($);
-  const names = (await ui.findAll({ type: "Button" })).map((b) => b.text);
+  const names = (await rowsOf(ui)).map((b: any) => b.text);
   expect(names).toHaveLength(50);
   expect(names[0]).toMatch(/ f54\.ts /);
   expect(names[49]).toMatch(/ f5\.ts /);
@@ -167,7 +176,7 @@ test("再起動後は store から読み戻す", async ($, on) => {
   await $.session.start({ cwd: "/proj", surface: "terminal", isInteractive: true });
 
   const ui = await mountPane($);
-  const rows = await ui.findAll({ type: "Button" });
+  const rows = await rowsOf(ui);
   expect(rows).toHaveLength(1);
   expect(rows[0]!.text).toMatch(/before\.ts  \+2行 −1行$/);
   expect(await ui.find({ type: "Text", text: "前のセッションの変更です。" })).toBeDefined();
@@ -181,12 +190,12 @@ test("/changes でペインを開く", async ($, on) => {
     origin: { kind: "composer" },
     presentation: { isFullscreen: true, columns: 120 },
   });
-  expect(text).toBe("📜 変更履歴ペインを開きました（0件）。Esc で閉じます");
+  expect(text).toBe("📜 変更タブを開きました（0件）。Esc で閉じます");
 });
 
 test("何もないときは案内だけ出る", async ($, on) => {
   setup(on);
   const ui = await mountPane($);
   expect(await ui.find({ type: "Text", text: "まだ変更はありません。" })).toBeDefined();
-  expect(await ui.findAll({ type: "Button" })).toHaveLength(0);
+  expect(await rowsOf(ui)).toHaveLength(0);
 });

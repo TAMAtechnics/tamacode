@@ -1,22 +1,25 @@
-// 今やってること・待ってていいかの判定・履歴・迷走検知（プロンプトの上の帯、/log、Spinner の日本語化）
+// 今やってること・待ってていいかの判定・ひと区切りの 3 行まとめ・迷走検知・Spinner の日本語化
 //
 // 帯（入力欄の上）に 1 行だけ上書きで出す:
-//   猫の顔 ＋ いま何をしているか（道具の名前は日本語、対象のファイルやコマンドつき）＋ 経過時間 ＋ 待っていいかの一言
+//   猫の顔 ＋ いま何をしているか（道具の名前は日本語、対象のファイルやコマンドつき）＋ 最後の動きからの時間 ＋ 待っていいかの一言
 //
 // 状態は 4 つ:
 //   A 実行中     tool.call が来て結果がまだ。時間がかかる作業（Bash は install/build/test/dev など）なら「待ってOK」
-//   B 書き出し中 turn.step の文字が増えている → 「待ってOK」
-//   C 返事待ち   許可ダイアログや質問で止まっている → 「あなたの番です」
+//   B 書き出し中 turn.step の文字が増えている → 「待ってOK」。道具の指示を書いている間は「次の作業の準備中（LICENSE を作る手順を書いてます）」
+//   C 返事待ち   許可ダイアログや質問で止まっている → 帯を黄色にして「あなたの番です。上を見て」
 //   D 無反応     A〜C のどれでもなく、最後の変化から 60 秒超 → 「動いてないかも」、120 秒超 → 「Escで止めて続きを頼むのが安全」
 //     時間がかかる作業でない Bash が 60 秒を超えたときも D と同じ扱い。
 // 「最後に変化があった時刻」は tool.call・結果・文字の増加・ダイアログ表示で更新する。
 //
+// ターンが終わると（turn.complete）、軽いモデルに「やったこと／確認の仕方／次にやること」の 3 行を頼み、
+// 返事の最後の行（Crunched for 4s → (=^‥q‥^=)ﾉ 4秒で完了）の下に出す。
+//
 // そのほか: 迷走検知（同じファイルを READ_LIMIT 回以上、同じエラーを ERROR_LIMIT 回以上）、
-// ツール出力のエラー文を用語ペイン（terms.tsx）へ渡す、Spinner と「Crunched for 4s」の日本語化、/log の履歴ペイン。
+// ツール出力のエラー文を用語（terms.tsx）へ渡す、/log の履歴。描画は pane.tsx の「たま」ペインのタブ。
 // ツールの実行は一切止めない（見せるだけ）。
 
 import type { EngineInterface, Register } from "claude-code";
-import type { TamacodeLogEntry, TamacodeNow, TamacodeTerms, TamacodeWander } from "../types/tamacode";
+import type { TamacodeLogEntry, TamacodeNow, TamacodeSummary, TamacodeTerms, TamacodeWander } from "../types/tamacode";
 import { buildTerms, pickErrorLines } from "./terms";
 
 // $.state の参照。plugin と key はリテラルでないと validate が読めない。
@@ -24,8 +27,10 @@ const NOW = { plugin: "tamacode", key: "now" } as const;
 const LOG = { plugin: "tamacode", key: "log" } as const;
 const WANDER = { plugin: "tamacode", key: "wander" } as const;
 const TERMS = { plugin: "tamacode", key: "terms" } as const;
+const SUMMARY = { plugin: "tamacode", key: "summary" } as const;
+const PANE_TAB = { plugin: "tamacode", key: "paneTab" } as const;
 
-const PANE_ID = "log";
+const PANE_ID = "tama";
 const LOG_LIMIT = 200;
 const MAX_OUTPUTS = 10; // 用語ペインに渡すツール出力は、ターン内で新しい方から 10 個まで
 const READ_LIMIT = 5;
@@ -34,7 +39,10 @@ const STALL_MS = 60_000; // これを超えて変化が無ければ「動いて�
 const ESC_MS = 120_000; // これを超えたら「Esc で止めて」
 const TICK_MS = 1000; // 帯の経過時間を描き直す間隔
 const TOKEN_WRITE_MS = 1000; // 文字の増加で state を書く間隔（毎チャンクは書かない）
-const MESSAGE = "Claudeが迷ってます。目的をもう一度言い直すか、/plan で整理すると抜けやすいです";
+const SUMMARY_MODEL = "haiku";
+const SUMMARY_MIN_ANSWER = 40; // これより短い返事はまとめない
+const SUMMARY_MAX_CHARS = 6000;
+const MESSAGE = "迷ってるかも。目的をもう一度言い直すか、/plan で整理すると抜けやすいです";
 
 // 猫の顔（状態ごと）
 export const CAT = {
@@ -62,14 +70,7 @@ const basename = (p: string): string => {
   return parts.length > 0 ? parts[parts.length - 1]! : String(p);
 };
 
-const pad2 = (n: number): string => String(n).padStart(2, "0");
-
-const hhmm = (ms: number): string => {
-  const d = new Date(ms);
-  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-};
-
-const short = (s: unknown, n = 40): string => {
+export const short = (s: unknown, n = 40): string => {
   const t = String(s ?? "")
     .replace(/\s+/g, " ")
     .trim();
@@ -271,26 +272,81 @@ export function describeTool(tool: string, input: Record<string, unknown>, cwd: 
   return d(CAT.idle, "");
 }
 
+// ---------- 書き出し中の言い換え ----------
+
+// 道具の指示（引数の JSON）を書いている途中から、対象（ファイル名やコマンド）を抜く
+export function extractTarget(partialJson: string): { file?: string; command?: string } {
+  const out: { file?: string; command?: string } = {};
+  const m1 = /"(file_path|notebook_path)"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(partialJson);
+  if (m1 && m1[2] !== "") out.file = m1[2]!.replace(/\\"/g, '"');
+  const m2 = /"command"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(partialJson);
+  if (m2 && m2[1] !== "") out.command = m2[1]!.replace(/\\n/g, " ").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+  return out;
+}
+
+// 「道具の指示を書いてる」を素人向けに。対象が分かれば入れる（LICENSE を作る手順を書いてます）
+export function prepText(tool: string, target: { file?: string; command?: string }, cwd: string | null): string {
+  if (tool === "") return "次の作業を準備中";
+  const file = target.file !== undefined ? rel(target.file, cwd) : null;
+  const cmd = target.command !== undefined ? short(target.command, 40) : null;
+  let what: string;
+  switch (tool) {
+    case "Write":
+      what = file === null ? "ファイルを作る手順を書いてます" : `${file} を作る手順を書いてます`;
+      break;
+    case "Edit":
+    case "MultiEdit":
+    case "NotebookEdit":
+      what = file === null ? "ファイルを書き換える手順を書いてます" : `${file} を書き換える手順を書いてます`;
+      break;
+    case "Bash":
+      what = cmd === null ? "コマンドを組み立ててます" : `コマンドを組み立ててます: ${cmd}`;
+      break;
+    case "Read":
+      what = file === null ? "読むファイルを決めてます" : `${file} を読む準備`;
+      break;
+    case "Grep":
+    case "Glob":
+      what = "探す条件を書いてます";
+      break;
+    case "Agent":
+    case "Task":
+      what = "サブエージェントへの指示を書いてます";
+      break;
+    case "AskUserQuestion":
+      what = "質問を用意してます";
+      break;
+    default: {
+      const m = /^mcp__([^_]+(?:_[^_]+)*)__(.+)$/.exec(tool);
+      what = m ? `${m[1]} への頼みごとを書いてます` : `${tool} の準備`;
+    }
+  }
+  return `次の作業の準備中（${what}）`;
+}
+
 // ---------- 待ってていいかの判定 ----------
 
 export type Verdict = {
   /** 判定後の猫 */
   face: string;
-  /** 帯の 1 行（猫 ＋ 何をしているか ＋ 経過 ＋ 一言） */
+  /** 帯の 1 行（猫 ＋ 何をしているか ＋ 最後の動きからの時間 ＋ 一言） */
   line: string;
   /** 一言だけ */
   verdict: string;
+  /** あなたの番（帯を黄色にして目を向けてもらう） */
+  isYourTurn: boolean;
 };
 
 // now と現在時刻から、帯に出す 1 行を決める
 export function judge(now: TamacodeNow, clock: number): Verdict {
-  const elapsed = Math.max(0, clock - now.startedAt);
   const silence = Math.max(0, clock - now.at);
   let face: string = now.face;
   let verdict = "";
+  let isYourTurn = false;
   if (now.phase === "waiting") {
     face = CAT.sleep;
-    verdict = "あなたの番です";
+    verdict = "あなたの番です。上を見て";
+    isYourTurn = true;
   } else if (now.phase === "running" && now.isLong) {
     verdict = "時間がかかる作業なので待ってOK";
   } else if (silence > ESC_MS) {
@@ -302,18 +358,84 @@ export function judge(now: TamacodeNow, clock: number): Verdict {
   } else if (now.phase === "writing") {
     verdict = "書き出し中なので待ってOK";
   }
-  const line = `${face} ${now.text}　${jpDuration(elapsed)}${verdict === "" ? "" : `　${verdict}`}`;
-  return { face, line, verdict };
+  // 帯の時間は「最後に動きがあってから」。Spinner の時間（ターン開始から）と区別がつくように言葉を添える
+  const line = `${face} ${now.text}　最後の動き ${jpDuration(silence)}前${verdict === "" ? "" : `　${verdict}`}`;
+  return { face, line, verdict, isYourTurn };
 }
 
-// Spinner の言葉。道具を動かしている間と書き出し中は帯と同じ文、それ以外は考え中/書いてます
-export function spinnerWord(mode: string, now: TamacodeNow | null): string {
-  if (now !== null && now.text !== "" && (mode === "tool-use" || mode === "tool-input" || now.phase === "writing" || now.phase === "waiting")) {
-    return `${now.face} ${now.text}`;
+// Spinner は猫だけ（文言と時間は帯に寄せる。同じ文が 2 か所に出ると煩い）
+export function spinnerFace(mode: string, now: TamacodeNow | null): string {
+  if (now !== null && now.text !== "") return judge(now, now.at).face;
+  if (mode === "tool-use" || mode === "tool-input") return CAT.run;
+  if (mode === "responding") return CAT.pause;
+  return CAT.think;
+}
+
+// ---------- ひと区切りの 3 行まとめ ----------
+
+const SUMMARY_LABELS = ["やったこと", "確認の仕方", "次にやること"] as const;
+
+export function summaryPrompt(prompt: string, answer: string): string {
+  const cut = (s: string) => (s.length > SUMMARY_MAX_CHARS ? s.slice(0, SUMMARY_MAX_CHARS) + "\n…(以下省略)" : s);
+  return [
+    "Claude が今の作業を終えました。プログラムを知らない人向けに、日本語で次の 3 行だけを書いてください。",
+    "1 行目は「やったこと: 」、2 行目は「確認の仕方: 」、3 行目は「次にやること: 」で始め、各行 40 字以内。",
+    "専門用語は禁止（関数・変数・API・コンポーネント・データベース・リクエスト・コミットなどの言葉は身近な言葉に言い換える）。",
+    "確認の仕方は、その人が自分の目で確かめられる具体的な動作（画面を開く、ボタンを押す、ファイルを見る）にする。",
+    "次にやることが無ければ「次にやること: 特になし。満足なら終わりでOK」と書く。",
+    "出力は 3 行だけ。前置き・見出し・記号・空行は不要。",
+    "",
+    prompt.trim() === "" ? "" : `頼まれたこと:\n${cut(prompt)}\n`,
+    `Claude の返事:\n${cut(answer)}`,
+  ].join("\n");
+}
+
+// モデルの返事を 3 行（ラベル付き）に整える。拾えなければ null
+export function tidySummary(text: string): string[] | null {
+  const lines = String(text ?? "")
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^[\s\-・*•#>]+/, "").trim())
+    .filter((l) => l !== "");
+  const out: string[] = [];
+  for (const label of SUMMARY_LABELS) {
+    const hit = lines.find((l) => l.startsWith(label));
+    if (hit === undefined) continue;
+    const body = hit
+      .slice(label.length)
+      .replace(/^[\s:：]+/, "")
+      .trim();
+    if (body !== "") out.push(`${label}: ${body.length > 60 ? body.slice(0, 59) + "…" : body}`);
   }
-  if (mode === "tool-use" || mode === "tool-input") return `${CAT.run} 作業中`;
-  if (mode === "responding") return `${CAT.pause} 書いてます`;
-  return `${CAT.think} 考え中`;
+  return out.length === 0 ? null : out;
+}
+
+async function summarizeTurn($: Dollar, req: { turnId: string; durationMs: number; prompt: string; answer: string }): Promise<void> {
+  let lines: string[] | null = null;
+  try {
+    const r = await $.model.complete({
+      model: SUMMARY_MODEL,
+      system: "あなたは、プログラムを知らない人に向けて、作業の区切りをやさしい日本語で 3 行にまとめる係です。",
+      prompt: summaryPrompt(req.prompt, req.answer),
+      effort: "low",
+      maxTokens: 300,
+      timeoutMs: 20000,
+    });
+    if (r.isAnswered) lines = tidySummary(r.text);
+    else $.ui.log(`3 行まとめなし: ${r.reason}`, { to: "debug" });
+  } catch (err) {
+    $.ui.log(`3 行まとめに失敗: ${String(err)}`, { to: "debug" });
+  }
+  // 別のターンがもう始まっていたら上書きしない
+  const cur = await readSummary($);
+  if (cur === null || cur.turnId !== req.turnId) return;
+  await $.state.set(SUMMARY, { ...cur, lines, isLoading: false });
+  $.ui.invalidate("ui.render");
+}
+
+async function readSummary($: Dollar): Promise<TamacodeSummary | null> {
+  const got = await $.state.get(SUMMARY);
+  const v = got.value as TamacodeSummary | null | undefined;
+  return v && typeof v === "object" && typeof v.turnId === "string" ? v : null;
 }
 
 // ---------- 迷走検知 ----------
@@ -349,6 +471,7 @@ let errors = new Map<string, number>();
 let hasToasted = false;
 let cwd: string | null = null;
 let isTurnRunning = false;
+let lastPrompt = "";
 let ticker: { cancel: () => void } | null = null;
 let lastTokenWrite = 0; // Date.now() 基準（state を書く間隔の制御だけに使う）
 let lastTokenText = "";
@@ -461,6 +584,7 @@ export const register: Register = (on) => {
     errors = new Map();
     hasToasted = false;
     isTurnRunning = true;
+    lastPrompt = e.text;
     lastTokenText = "";
     if (ticker === null) {
       ticker = $.clock.every(TICK_MS, () => {
@@ -472,11 +596,21 @@ export const register: Register = (on) => {
     return next(e);
   });
 
-  // 返事が終わったら「今やってること」を消す
+  // 返事が終わったら「今やってること」を消し、3 行まとめを裏で頼む
   on("turn.complete", async ($, e, next) => {
     if (e.agentId === undefined) {
       isTurnRunning = false;
       await $.state.set(NOW, null);
+      if (e.reason === "answer" && e.answer.trim().length >= SUMMARY_MIN_ANSWER) {
+        const req = { turnId: e.turnId, durationMs: e.durationMs, prompt: lastPrompt, answer: e.answer };
+        await $.state.set(SUMMARY, { turnId: e.turnId, durationMs: e.durationMs, at: await $.clock.now(), lines: null, isLoading: true } satisfies TamacodeSummary);
+        // このフックの dispatch が終わると途中の $ 呼び出しは打ち切られうるので、タイマーで別の dispatch に載せる
+        $.clock.after(0, () => {
+          void summarizeTurn($, req);
+        });
+      } else {
+        await $.state.set(SUMMARY, null);
+      }
     }
     return next(e);
   });
@@ -484,11 +618,28 @@ export const register: Register = (on) => {
   // B 書き出し中: モデルの文字が増えるたびに「最後の変化」を更新する（state は 1 秒に 1 回まで）
   on("turn.step", async function* ($, e, next) {
     if (e.agentId !== undefined) return yield* next(e);
+    const toolByBlock = new Map<number, string>(); // 道具の指示ブロックごとの道具名
+    const jsonByBlock = new Map<number, string>(); // 同じく、ここまで届いた引数の JSON
     for await (const chunk of next(e)) {
       try {
-        if (chunk.kind === "text" || chunk.kind === "thinking" || chunk.kind === "input" || chunk.kind === "tool") {
-          const text = chunk.kind === "thinking" ? "考えてる" : chunk.kind === "text" ? "返事を書いてる" : "道具の指示を書いてる";
-          const face = chunk.kind === "thinking" ? CAT.think : chunk.kind === "text" ? CAT.pause : CAT.write;
+        let text: string | null = null;
+        let face: string = CAT.write;
+        if (chunk.kind === "thinking") {
+          text = "考えてる";
+          face = CAT.think;
+        } else if (chunk.kind === "text") {
+          text = "返事を書いてる";
+          face = CAT.pause;
+        } else if (chunk.kind === "tool") {
+          toolByBlock.set(chunk.index, chunk.name);
+          jsonByBlock.set(chunk.index, "");
+          text = prepText(chunk.name, {}, cwd);
+        } else if (chunk.kind === "input") {
+          const json = (jsonByBlock.get(chunk.index) ?? "") + chunk.json;
+          jsonByBlock.set(chunk.index, json.length > 4000 ? json.slice(0, 4000) : json);
+          text = prepText(toolByBlock.get(chunk.index) ?? "", extractTarget(json), cwd);
+        }
+        if (text !== null) {
           const wall = Date.now();
           if (text !== lastTokenText || wall - lastTokenWrite >= TOKEN_WRITE_MS) {
             lastTokenText = text;
@@ -574,41 +725,16 @@ export const register: Register = (on) => {
     return result;
   });
 
-  // /log: 履歴ペインを開く
+  // /log: 「たま」ペインの「やったこと」タブを開く
   on("command.run", { command: "log" }, async ($) => {
     const list = await readLog($);
-    const opened = await $.ui.open({ id: PANE_ID, title: "やったこと", focus: true, closeOnEscape: true, columns: 60, rows: 24 });
+    await $.state.set(PANE_TAB, "log");
+    const opened = await $.ui.open({ id: PANE_ID, title: "たま", focus: true, closeOnEscape: true, columns: 60, rows: 24 });
     if (!opened.isPlaced) return { text: `${CAT.idle} やったこと（${list.length}件）は待機中です: ${opened.reason}` };
-    return { text: `${CAT.idle} やったことペインを開きました（${list.length}件）。Esc で閉じます` };
+    return { text: `${CAT.idle} やったことタブを開きました（${list.length}件）。Esc で閉じます` };
   });
 
-  on("ui.render", { component: "Pane", requestId: PANE_ID }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e);
-    const list = await readLog($);
-    return (
-      <Box flexDirection="column" paddingX={1}>
-        <Text bold>{CAT.idle} やったこと（新しい順・最大{LOG_LIMIT}件）</Text>
-        <Text dimColor>同じことが続いたときは ×n にまとめています。Esc で閉じる</Text>
-        {list.length === 0 ? (
-          <Box marginTop={1}>
-            <Text dimColor>{CAT.sleep} まだ何もしていません。</Text>
-          </Box>
-        ) : (
-          <Box flexDirection="column" marginTop={1}>
-            {list.map((l) => (
-              <Text wrap="truncate-end">
-                <Text dimColor>{hhmm(l.at)} </Text>
-                {l.text}
-                {l.count > 1 ? <Text dimColor> ×{l.count}</Text> : null}
-              </Text>
-            ))}
-          </Box>
-        )}
-      </Box>
-    );
-  });
-
-  // 入力欄の上の帯: 今やってること＋待ってていいか（1 行、上書き）＋ 迷走の注意
+  // 入力欄の上の帯: 今やってること＋待ってていいか（1 行、上書き。あなたの番なら黄色）＋ 迷走の注意
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
     const [now, wGot, clock] = await Promise.all([readNow($), $.state.get(WANDER), $.clock.now()]);
     const shown = e.props.isWorking && now !== null && now.text !== "" ? judge(now, clock) : null;
@@ -620,7 +746,7 @@ export const register: Register = (on) => {
       <Box flexDirection="column" paddingX={1}>
         {shown !== null ? (
           <Box>
-            <Text color="cyan" wrap="truncate-end">
+            <Text color={shown.isYourTurn ? "yellow" : "cyan"} bold={shown.isYourTurn} wrap="truncate-end">
               {shown.line}
             </Text>
           </Box>
@@ -649,19 +775,31 @@ export const register: Register = (on) => {
     );
   });
 
-  // Spinner（Flowing… など）を猫と日本語に。道具を動かしている間は帯と同じ文
+  // Spinner（Flowing… など）は猫だけにする（文言と時間は帯に）
   on("ui.render", { component: "Spinner" }, async ($, e, next) => {
     const now = await readNow($);
-    return next({ ...e, props: { ...e.props, word: spinnerWord(e.props.mode, now) } });
+    return next({ ...e, props: { ...e.props, word: spinnerFace(e.props.mode, now), suffix: "" } });
   });
 
-  // 返事の最後の行（Crunched for 4s）を猫と日本語に
+  // 返事の最後の行（Crunched for 4s）を猫と日本語に。その下に 3 行まとめ
   on("ui.render", { component: "TurnDuration" }, async ($, e) => {
-    const { Text } = $.ui.resolve(e);
+    const { Box, Text } = $.ui.resolve(e);
+    const sum = await readSummary($);
+    const mine = sum !== null && Math.abs(sum.durationMs - e.props.durationMs) <= 1500 ? sum : null;
     return (
-      <Text dimColor>
-        {CAT.done} {jpDuration(e.props.durationMs)}で完了
-      </Text>
+      <Box flexDirection="column">
+        <Text dimColor>
+          {CAT.done} {jpDuration(e.props.durationMs)}で完了
+          {mine !== null && mine.isLoading ? "　（3 行まとめを用意中…）" : ""}
+        </Text>
+        {mine !== null && mine.lines !== null ? (
+          <Box flexDirection="column" paddingLeft={2}>
+            {mine.lines.map((l) => (
+              <Text wrap="wrap">{l}</Text>
+            ))}
+          </Box>
+        ) : null}
+      </Box>
     );
   });
 };

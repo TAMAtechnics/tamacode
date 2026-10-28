@@ -4,15 +4,18 @@
 // （session.start は changes.tsx、tool.call / turn.start / turn.complete は activity.tsx が持つ。他はマッチャー付きで登録する）。
 //   - changes.tsx  : 変更履歴ペイン（/changes）。/log のコマンド登録もここ
 //   - terms.tsx    : 用語翻訳ペイン（/terms）
-//   - activity.tsx : 今やってることの帯・履歴（/log）・迷走検知・Spinner の日本語化
+//   - activity.tsx : 今やってることの帯・3 行まとめ・履歴（/log）・迷走検知・Spinner の日本語化
+//   - pane.tsx     : 「たま」ペイン（用語 / 変更 / やったこと のタブ）の描画
 
 import type { Register } from "claude-code";
 import { register as registerChanges } from "./changes";
 import { register as registerTerms } from "./terms";
 import { register as registerActivity } from "./activity";
+import { register as registerPane } from "./pane";
 
 export const register: Register = (on, options) => {
   registerChanges(on, options);
   registerTerms(on, options);
   registerActivity(on, options);
+  registerPane(on, options);
 };

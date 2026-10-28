@@ -2,13 +2,13 @@
 import { test, expect, mock } from "claude-code/testing";
 import type { Engine, MockClock } from "claude-code/testing";
 import type { On } from "claude-code";
-import { CAT, describeTool, isLongBash, jpDuration, judge, readFilesInCommand } from "./activity";
+import { CAT, describeTool, extractTarget, isLongBash, jpDuration, judge, prepText, readFilesInCommand, tidySummary } from "./activity";
 
 const BAND_PROPS = { hasSurvey: false, isWorking: false, maxRows: 6, bodyColumns: 100 } as any;
 const WORKING = { ...BAND_PROPS, isWorking: true };
 const PANE_PROPS = { title: "やったこと", isFocused: true, bodyColumns: 60, placement: "dock", scroll: { top: 0 }, view: {} } as any;
 const RUN = { origin: { kind: "composer" }, presentation: { isFullscreen: true, columns: 120 } } as const;
-const MESSAGE = "Claudeが迷ってます。目的をもう一度言い直すか、/plan で整理すると抜けやすいです";
+const MESSAGE = "迷ってるかも。目的をもう一度言い直すか、/plan で整理すると抜けやすいです";
 const T0 = 1_800_000_000_000;
 
 type SetupOptions = {
@@ -17,6 +17,8 @@ type SetupOptions = {
   /** Bash の底が結果を返すまでに待つミリ秒（実行中の帯を見るため） */
   bashTakes?: number;
   toasts?: string[];
+  /** 3 行まとめの底が返す文 */
+  summary?: string;
 };
 
 function setup(on: On, opts: SetupOptions = {}) {
@@ -36,6 +38,13 @@ function setup(on: On, opts: SetupOptions = {}) {
   on("fs.read", () => ({ value: "const a = 1;\n" }));
   on("turn.start", (_$, e) => ({ turnId: e.turnId }));
   on("turn.complete", (_$, e) => ({ text: e.answer }));
+  on("model.complete", () => ({
+    value: {
+      isAnswered: true,
+      text: opts.summary ?? "やったこと: 猫の顔を足しました。\n確認の仕方: 入力欄の上の帯を見てください。\n次にやること: 特になし。満足なら終わりでOK",
+      usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    },
+  }));
   // 帯に出す物が無いとき、プラグインは next(e) でエンジンに任せる。ここではエンジンの代わりに空の箱を描く
   on("ui.render", { component: "AbovePrompt" }, ($, e) => {
     const { Box } = $.ui.resolve(e);
@@ -93,15 +102,15 @@ test("A 実行中: 時間がかかる Bash は「待ってOK」。60 秒を超�
   await $.turn.start({ text: "ビルドして", turnId: "t1" });
 
   const call = bash($, "npm run build");
-  expect(await startAndPeek($, clock, call)).toEqual([`${CAT.run} ビルド中: npm run build　0秒　時間がかかる作業なので待ってOK`]);
+  expect(await startAndPeek($, clock, call)).toEqual([`${CAT.run} ビルド中: npm run build　最後の動き 0秒前　時間がかかる作業なので待ってOK`]);
 
   await clock.advance(65_000);
-  expect(await bandText($, WORKING)).toEqual([`${CAT.run} ビルド中: npm run build　1分5秒　時間がかかる作業なので待ってOK`]);
+  expect(await bandText($, WORKING)).toEqual([`${CAT.run} ビルド中: npm run build　最後の動き 1分5秒前　時間がかかる作業なので待ってOK`]);
 
   await clock.advance(35_000);
   await call;
   // 終わったら「次を考えてる」
-  expect(await bandText($, WORKING)).toEqual([`${CAT.think} 次を考えてる　0秒`]);
+  expect(await bandText($, WORKING)).toEqual([`${CAT.think} 次を考えてる　最後の動き 0秒前`]);
 });
 
 test("A→D: 時間がかかる系でない Bash は 60 秒で「動いてないかも」、120 秒で「Esc で止めて」になる", async ($, on) => {
@@ -109,13 +118,13 @@ test("A→D: 時間がかかる系でない Bash は 60 秒で「動いてない
   await $.turn.start({ text: "見て", turnId: "t1" });
 
   const call = bash($, "cat -n hooks/terms.tsx");
-  expect(await startAndPeek($, clock, call)).toEqual([`${CAT.read} ファイルの中身を見てる: cat -n hooks/terms.tsx　0秒`]);
+  expect(await startAndPeek($, clock, call)).toEqual([`${CAT.read} ファイルの中身を見てる: cat -n hooks/terms.tsx　最後の動き 0秒前`]);
 
   await clock.advance(61_000);
-  expect(await bandText($, WORKING)).toEqual([`${CAT.error} ファイルの中身を見てる: cat -n hooks/terms.tsx　1分1秒　動いてないかも`]);
+  expect(await bandText($, WORKING)).toEqual([`${CAT.error} ファイルの中身を見てる: cat -n hooks/terms.tsx　最後の動き 1分1秒前　動いてないかも`]);
 
   await clock.advance(60_000);
-  expect(await bandText($, WORKING)).toEqual([`${CAT.stopped} ファイルの中身を見てる: cat -n hooks/terms.tsx　2分1秒　Escで止めて続きを頼むのが安全`]);
+  expect(await bandText($, WORKING)).toEqual([`${CAT.stopped} ファイルの中身を見てる: cat -n hooks/terms.tsx　最後の動き 2分1秒前　Escで止めて続きを頼むのが安全`]);
   await clock.advance(100_000);
   await call;
 });
@@ -125,9 +134,9 @@ test("C 返事待ち: 質問で止まっているときは「あなたの番で�
   await $.turn.start({ text: "決めて", turnId: "t1" });
 
   const call = $.tool.call({ tool: "AskUserQuestion", questions: [] } as any);
-  expect(await startAndPeek($, clock, call)).toEqual([`${CAT.sleep} 質問に答えてください　0秒　あなたの番です`]);
+  expect(await startAndPeek($, clock, call)).toEqual([`${CAT.sleep} 質問に答えてください　最後の動き 0秒前　あなたの番です。上を見て`]);
   await clock.advance(300_000);
-  expect(await bandText($, WORKING)).toEqual([`${CAT.sleep} 質問に答えてください　5分　あなたの番です`]);
+  expect(await bandText($, WORKING)).toEqual([`${CAT.sleep} 質問に答えてください　最後の動き 5分前　あなたの番です。上を見て`]);
   await clock.advance(100_000);
   await call;
 });
@@ -136,9 +145,9 @@ test("D 無反応: 道具が終わってから何も起きないと 60 秒で「
   const clock = setup(on);
   await $.turn.start({ text: "見て", turnId: "t1" });
   await read($, "/proj/hooks/changes.tsx");
-  expect(await bandText($, WORKING)).toEqual([`${CAT.think} 次を考えてる　0秒`]);
+  expect(await bandText($, WORKING)).toEqual([`${CAT.think} 次を考えてる　最後の動き 0秒前`]);
   await clock.advance(61_000);
-  expect(await bandText($, WORKING)).toEqual([`${CAT.error} 次を考えてる　1分1秒　動いてないかも`]);
+  expect(await bandText($, WORKING)).toEqual([`${CAT.error} 次を考えてる　最後の動き 1分1秒前　動いてないかも`]);
 });
 
 test("エラーで終わった道具はエラーの猫と見出しを出す。拒否されたら「止めました」", async ($, on) => {
@@ -147,10 +156,10 @@ test("エラーで終わった道具はエラーの猫と見出しを出す。�
   await $.turn.start({ text: "テストして", turnId: "t1" });
 
   await bash($, "npm test");
-  expect(await bandText($, WORKING)).toEqual([`${CAT.error} エラーが出ました: Error: Cannot find module './config'　0秒`]);
+  expect(await bandText($, WORKING)).toEqual([`${CAT.error} エラーが出ました: Error: Cannot find module './config'　最後の動き 0秒前`]);
 
   await $.tool.call({ tool: "Grep", pattern: "x" } as any);
-  expect(await bandText($, WORKING)).toEqual([`${CAT.stopped} 止めました: 許可されていません　0秒`]);
+  expect(await bandText($, WORKING)).toEqual([`${CAT.stopped} 止めました: 許可されていません　最後の動き 0秒前`]);
 });
 
 test("返事が終わる（isWorking でない）と帯の「今やってること」は出ない", async ($, on) => {
@@ -165,8 +174,8 @@ test("返事が終わる（isWorking でない）と帯の「今やってるこ�
 
 test("judge: 書き出し中は「待ってOK」、60 秒文字が増えなければ D になる", () => {
   const now = { phase: "writing", face: CAT.pause, text: "返事を書いてる", tool: null, isLong: true, startedAt: T0, at: T0 } as const;
-  expect(judge(now, T0 + 5_000).line).toBe(`${CAT.pause} 返事を書いてる　5秒　書き出し中なので待ってOK`);
-  expect(judge({ ...now, at: T0 + 30_000 }, T0 + 95_000).line).toBe(`${CAT.error} 返事を書いてる　1分35秒　動いてないかも`);
+  expect(judge(now, T0 + 5_000).line).toBe(`${CAT.pause} 返事を書いてる　最後の動き 5秒前　書き出し中なので待ってOK`);
+  expect(judge({ ...now, at: T0 + 30_000 }, T0 + 95_000).line).toBe(`${CAT.error} 返事を書いてる　最後の動き 1分5秒前　動いてないかも`);
   expect(judge(now, T0 + 130_000).verdict).toBe("Escで止めて続きを頼むのが安全");
 });
 
@@ -178,8 +187,8 @@ test("/log で履歴ペインが開き、同じことが続いたら ×n にま�
   await bash($, "cat -n hooks/terms.tsx");
   await bash($, "npm test");
 
-  expect((await $.command.run({ command: "log", args: "", ...RUN })).text).toBe(`${CAT.idle} やったことペインを開きました（3件）。Esc で閉じます`);
-  const ui = await $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "Pane", requestId: "log", props: PANE_PROPS });
+  expect((await $.command.run({ command: "log", args: "", ...RUN })).text).toBe(`${CAT.idle} やったことタブを開きました（3件）。Esc で閉じます`);
+  const ui = await $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "Pane", requestId: "tama", props: PANE_PROPS });
   const texts = (await ui.findAll({ type: "Text" })).map((t) => t.text);
   expect(texts.some((t) => t.includes(`${CAT.read} ファイルの中身を見てる: cat -n hooks/terms.tsx`) && t.includes("×3"))).toBe(true);
   expect(texts.some((t) => t.includes(`${CAT.run} テスト中: npm test`))).toBe(true);
@@ -190,7 +199,7 @@ test("/log で履歴ペインが開き、同じことが続いたら ×n にま�
   expect(i).toBeLessThan(j);
 });
 
-test("Spinner は猫と日本語になり、道具を動かしている間は帯と同じ文になる", async ($, on) => {
+test("Spinner は猫だけになる（文言と時間は帯に寄せる）", async ($, on) => {
   setup(on);
   const spinner = async (mode: string) => {
     const ui = await $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "Spinner", requestId: "main", props: { word: "Flowing", message: null, suffix: "…", mode } as any });
@@ -199,18 +208,66 @@ test("Spinner は猫と日本語になり、道具を動かしている間は帯
     return texts;
   };
 
-  expect(await spinner("thinking")).toEqual([`${CAT.think} 考え中…`]);
-  expect(await spinner("responding")).toEqual([`${CAT.pause} 書いてます…`]);
-  expect(await spinner("tool-use")).toEqual([`${CAT.run} 作業中…`]);
+  expect(await spinner("thinking")).toEqual([CAT.think]);
+  expect(await spinner("responding")).toEqual([CAT.pause]);
+  expect(await spinner("tool-use")).toEqual([CAT.run]);
 
   await $.turn.start({ text: "見て", turnId: "t1" });
   await bash($, "cat -n hooks/terms.tsx");
-  expect(await spinner("tool-use")).toEqual([`${CAT.think} 次を考えてる…`]);
+  expect(await spinner("tool-use")).toEqual([CAT.think]);
+});
+
+test("書き出し中の言い換え: 道具の指示は「次の作業の準備中（対象つき）」になる", () => {
+  expect(prepText("Write", extractTarget('{"file_path": "/proj/LICENSE", "content": "MIT'), "/proj")).toBe("次の作業の準備中（LICENSE を作る手順を書いてます）");
+  expect(prepText("Write", {}, "/proj")).toBe("次の作業の準備中（ファイルを作る手順を書いてます）");
+  expect(prepText("Edit", extractTarget('{"file_path":"/proj/hooks/terms.tsx","old_string":"a'), "/proj")).toBe("次の作業の準備中（hooks/terms.tsx を書き換える手順を書いてます）");
+  expect(prepText("Bash", extractTarget('{"command": "cat > LICENSE <<EOF\\nMIT License'), "/proj")).toBe("次の作業の準備中（コマンドを組み立ててます: cat > LICENSE <<EOF MIT License）");
+  expect(prepText("Bash", {}, "/proj")).toBe("次の作業の準備中（コマンドを組み立ててます）");
+  expect(prepText("Grep", {}, "/proj")).toBe("次の作業の準備中（探す条件を書いてます）");
+  expect(prepText("", {}, "/proj")).toBe("次の作業を準備中");
+});
+
+test("ひと区切り: 返事が終わると完了行の下に「やったこと／確認の仕方／次にやること」が出る", async ($, on) => {
+  const clock = setup(on);
+  await $.turn.start({ text: "猫を足して", turnId: "t1" });
+  await $.turn.complete({ answer: "猫の顔文字を 13 種類割り当てて、帯と Spinner と完了行に反映しました。テストも通っています。", reason: "answer", durationMs: 31_000, isAborted: false, turnId: "t1" } as any);
+
+  const mount = () => $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "TurnDuration", requestId: "m1", props: { word: "Crunched", durationMs: 31_000 } as any });
+  // 頼んだ直後は「用意中」
+  let ui = await mount();
+  expect((await ui.findAll({ type: "Text" })).map((t) => t.text)).toEqual([`${CAT.done} 31秒で完了　（3 行まとめを用意中…）`]);
+  await ui.unmount();
+
+  await clock.advance(0);
+  ui = await mount();
+  expect((await ui.findAll({ type: "Text" })).map((t) => t.text)).toEqual([
+    `${CAT.done} 31秒で完了`,
+    "やったこと: 猫の顔を足しました。",
+    "確認の仕方: 入力欄の上の帯を見てください。",
+    "次にやること: 特になし。満足なら終わりでOK",
+  ]);
+  await ui.unmount();
+
+  // 別のターンの完了行には付かない
+  ui = await $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "TurnDuration", requestId: "m0", props: { word: "Baked", durationMs: 5_000 } as any });
+  expect((await ui.findAll({ type: "Text" })).map((t) => t.text)).toEqual([`${CAT.done} 5秒で完了`]);
+  await ui.unmount();
+
+  // 短い返事にはまとめを付けない
+  await $.turn.start({ text: "ok?", turnId: "t2" });
+  await $.turn.complete({ answer: "はい。", reason: "answer", durationMs: 2_000, isAborted: false, turnId: "t2" } as any);
+  await clock.advance(0);
+  ui = await $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "TurnDuration", requestId: "m2", props: { word: "Baked", durationMs: 2_000 } as any });
+  expect((await ui.findAll({ type: "Text" })).map((t) => t.text)).toEqual([`${CAT.done} 2秒で完了`]);
+
+  // モデルの返事の整形: 箇条書きや余計な行があってもラベル付き 3 行にする
+  expect(tidySummary("- やったこと：Aを直した\n\n確認の仕方: Bを開く\nおまけ\n次にやること: なし")).toEqual(["やったこと: Aを直した", "確認の仕方: Bを開く", "次にやること: なし"]);
+  expect(tidySummary("")).toBeNull();
 });
 
 test("返事の最後の行（Crunched for 4s）は「完了」の猫と秒数になる", async ($, on) => {
   setup(on);
-  const ui = await $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "TurnDuration", requestId: "m1", props: { word: "Crunched", durationMs: 64_000 } as any });
+  const ui = await $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "TurnDuration", requestId: "m9", props: { word: "Crunched", durationMs: 64_000 } as any });
   expect((await ui.findAll({ type: "Text" })).map((t) => t.text)).toEqual([`${CAT.done} 1分4秒で完了`]);
   expect(jpDuration(4_000)).toBe("4秒");
   expect(jpDuration(120_000)).toBe("2分");
