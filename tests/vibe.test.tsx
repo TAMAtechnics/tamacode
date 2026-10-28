@@ -13,6 +13,7 @@ function setup(on: On, opts: { bashTakes?: number } = {}) {
   const rec = { opens: [] as string[], closes: [] as string[] };
   mock.store(on, {});
   const clock = mock.clock(on, { now: T0 });
+  on("session.start", (_$, e) => ({ cwd: e.cwd }));
   on("session.cwd", () => ({ value: "/proj" }));
   on("session.usage", () => ({ value: { startedAt: T0 - 60_000, context: { window: 200000 }, rateLimits: [] } }));
   on("command.register", (_$, e) => ({ value: { command: e.name } }));
@@ -104,6 +105,17 @@ test("/kakkoii でオン（HUD を開く）、もう一度でオフ（閉じる�
 
   expect((await $.command.run({ command: "kakkoii", args: "", ...RUN })).text).toBe("雰囲気モード オフ。HUD を閉じました");
   expect(rec.closes).toEqual(["hud"]);
+});
+
+test("雰囲気モードをオンのまま起動・再読み込みすると HUD を開き直す（オフなら開かない）", async ($, on) => {
+  const rec = setup(on);
+  await $.session.start({ cwd: "/proj", surface: "terminal", isInteractive: true });
+  expect(rec.opens.filter((id) => id === "hud")).toEqual([]);
+  await $.command.run({ command: "kakkoii", args: "", ...RUN });
+  expect(rec.opens.filter((id) => id === "hud")).toEqual(["hud"]);
+  // 再読み込み（session.start がもう一度来る）
+  await $.session.start({ cwd: "/proj", surface: "terminal", isInteractive: true });
+  expect(rec.opens.filter((id) => id === "hud")).toEqual(["hud", "hud"]);
 });
 
 test("Desktop では SVG で描く（数字は実データ、棒は前回の値から動く）", async ($, on) => {

@@ -64,7 +64,29 @@ function stopTicker(): void {
   ticker = null;
 }
 
+// 起動時・再読み込み時: 雰囲気モードがオンのままなら HUD を開き直す（$ は import を越えられないので、このファイルの中で呼ぶ）
+async function reopenHudIfOn($: Dollar): Promise<void> {
+  if (!(await readOn($))) return;
+  startTicker($);
+  try {
+    const opened = await $.ui.open({ id: HUD_ID, title: "HUD", columns: getVibeConfig().hudColumns, rows: 24 });
+    if (!opened.isPlaced) $.ui.log(`HUD は待機中: ${opened.reason}`, { to: "debug" });
+  } catch (err) {
+    $.ui.log(`HUD を開けません: ${String(err)}`, { to: "debug" });
+  }
+}
+
 export const register: Register = (on) => {
+  // 人が画面を見ている会話だけ。マッチャー無しの session.start は changes.tsx が持っているので、ここはマッチャー付き
+  on("session.start", { isInteractive: true }, async ($, e, next) => {
+    try {
+      await reopenHudIfOn($);
+    } catch (err) {
+      $.ui.log(`HUD の開き直しに失敗: ${String(err)}`, { to: "debug" });
+    }
+    return next(e);
+  });
+
   on("command.run", { command: "kakkoii" }, async ($) => {
     const cur = await readOn($);
     if (cur) {
