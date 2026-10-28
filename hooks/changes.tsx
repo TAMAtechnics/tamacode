@@ -394,6 +394,7 @@ async function onSessionStart($: Dollar): Promise<void> {
     { name: "kantan", description: "もっと簡単に（今の説明を小学生にも分かる言い方で言い直してもらう）" },
     { name: "kakunin", description: "確認して（ビルドとテストを回して合格か不合格かと原因を一言で）" },
     { name: "tenken", description: "点検（秘密の鍵の直書き・誰でも見えるテーブル・本人確認の無い入口などを探す）" },
+    { name: "miru", description: "ブラウザで見る（作ったものを開く。開発サーバーが動いていなければ起動して開く）" },
   ]) {
     try {
       await $.command.register(cmd);

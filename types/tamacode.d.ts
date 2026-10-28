@@ -236,6 +236,20 @@ export type TamacodeTenken = {
   isGit: boolean;
 };
 
+/** 開発サーバーの様子（「ブラウザで見る」） */
+export type TamacodeServer = {
+  port: number;
+  url: string;
+  /** 今答えているか */
+  isUp: boolean;
+  /** 起動して立ち上がりを待っている最中か */
+  isStarting: boolean;
+  /** 起動に使ったコマンド。分からなければ null */
+  command: string | null;
+  /** 最後に様子が変わった時刻（エポックミリ秒） */
+  at: number;
+};
+
 /** /log ペインに並べる1行 */
 export type TamacodeLogEntry = {
   /** 最後にこの行を出した時刻（エポックミリ秒） */
@@ -303,6 +317,8 @@ declare module 'claude-code' {
       tenken: TamacodeTenken | null;
       /** Claude の作業が終わってから送る文。無ければ null */
       pendingPrompt: string | null;
+      /** 開発サーバーの様子。知らなければ null */
+      server: TamacodeServer | null;
       /** 自動バックアップの一覧。新しい順、最大 100 件 */
       backups: TamacodeBackup[];
       /** 迷走検知。何も無ければ null */

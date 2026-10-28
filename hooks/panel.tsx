@@ -9,7 +9,8 @@
 // コマンド名は英数字しか使えない（Claude Code の決まり）ので、ローマ字にしてある。
 
 import type { EngineInterface, Register } from "claude-code";
-import type { TamacodeBackup, TamacodeFinding, TamacodeNotice, TamacodeRead, TamacodeRequest, TamacodeRestore, TamacodeTenken, TamacodeWatchStats, TamacodeWizardDraft } from "../types/tamacode";
+import type { TamacodeBackup, TamacodeFinding, TamacodeNotice, TamacodeRead, TamacodeRequest, TamacodeRestore, TamacodeServer, TamacodeTenken, TamacodeWatchStats, TamacodeWizardDraft } from "../types/tamacode";
+import { planDev, urlOf } from "./server";
 import { CAT, isTurnRunningNow, rel, short } from "./activity";
 import { t } from "./locale";
 import { findSecrets, getRules, isExcludedPath, isScannableFile, scanFileText, weekStart, type Finding } from "./watch";
@@ -31,6 +32,7 @@ const RESTORE = { plugin: "tamacode", key: "restore" } as const;
 const BACKUPS = { plugin: "tamacode", key: "backups" } as const;
 const READ_OPEN = { plugin: "tamacode", key: "readOpen" } as const;
 const TENKEN = { plugin: "tamacode", key: "tenken" } as const;
+const SERVER = { plugin: "tamacode", key: "server" } as const;
 const WATCH_SEEN = { plugin: "tamacode", key: "watchSeen" } as const;
 const WATCH_STATS = { plugin: "tamacode", key: "watchStats" } as const;
 const STORE_SEEN = "watchSeen";
@@ -498,9 +500,198 @@ async function runRestore($: Dollar): Promise<void> {
   }
 }
 
+
+const SERVER_POLL_MS = 10_000; // 動いている間の確認間隔
+const SERVER_STARTUP_POLL_MS = 1_000; // 起動待ちの確認間隔
+const STARTUP_MAX_TRIES = 90; // 起動待ちは最長 90 秒
+
+// ---------- 「ブラウザで見る」（/miru）: 動いていれば開く、無ければ起動して開く、動いている間は状態行を光らせる ----------
+
+let poller: { cancel: () => void } | null = null;
+let startupTries = 0;
+
+async function readServer($: Dollar): Promise<TamacodeServer | null> {
+  const got = await $.state.get(SERVER);
+  const v = got.value as TamacodeServer | null | undefined;
+  return v && typeof v === "object" && typeof v.port === "number" ? v : null;
+}
+
+// そのポートで何か答えるか（curl の HTTP コード。000 なら誰もいない）
+async function isUp($: Dollar, port: number): Promise<boolean> {
+  try {
+    const r = await $.process.run(["curl", "-s", "-o", "/dev/null", "-m", "1", "-w", "%{http_code}", urlOf(port)], { timeoutMs: 3000 });
+    const code = r.stdout.trim();
+    return r.exitCode === 0 && code !== "" && code !== "000";
+  } catch {
+    return false;
+  }
+}
+
+async function findUp($: Dollar, ports: number[]): Promise<number | null> {
+  for (const p of ports) if (await isUp($, p)) return p;
+  return null;
+}
+
+async function openBrowser($: Dollar, url: string): Promise<boolean> {
+  for (const argv of [
+    ["open", url],
+    ["xdg-open", url],
+    ["cmd", "/c", "start", "", url],
+  ]) {
+    try {
+      const r = await $.process.run(argv, { timeoutMs: 5000 });
+      if (r.exitCode === 0) return true;
+    } catch {
+      // 次の方法へ
+    }
+  }
+  return false;
+}
+
+// 状態行の印
+function light($: Dollar, server: TamacodeServer | null): void {
+  if (server !== null && server.isUp) $.ui.status(t("server.status", { host: `localhost:${server.port}` }));
+  else $.ui.status(undefined);
+}
+
+async function setServer($: Dollar, next: TamacodeServer | null): Promise<void> {
+  await $.state.set(SERVER, next);
+  light($, next);
+  $.ui.invalidate("ui.render");
+}
+
+// 動いている間（と起動待ちの間）定期的に確かめる
+function ensurePoller($: Dollar): void {
+  if (poller !== null) return;
+  poller = $.clock.every(SERVER_STARTUP_POLL_MS, () => {
+    void tick($);
+  });
+}
+
+let tickCount = 0;
+async function tick($: Dollar): Promise<void> {
+  const cur = await readServer($);
+  if (cur === null) return;
+  tickCount++;
+  if (cur.isStarting) {
+    startupTries++;
+    const up = await isUp($, cur.port);
+    if (up) {
+      const next: TamacodeServer = { ...cur, isUp: true, isStarting: false, at: await $.clock.now() };
+      await setServer($, next);
+      const opened = await openBrowser($, urlOf(cur.port));
+      await notify($, CAT.done, opened ? t("server.opened", { url: urlOf(cur.port) }) : t("server.upNoBrowser", { url: urlOf(cur.port) }));
+    } else if (startupTries >= STARTUP_MAX_TRIES) {
+      await setServer($, { ...cur, isStarting: false, isUp: false });
+      await notify($, CAT.error, t("server.startTimeout", { command: cur.command ?? "" }));
+    }
+    return;
+  }
+  // 動いている間は 10 秒ごと（1 秒刻みの 10 回に 1 回）
+  if (tickCount % Math.round(SERVER_POLL_MS / SERVER_STARTUP_POLL_MS) !== 0) return;
+  const up = await isUp($, cur.port);
+  if (up !== cur.isUp) await setServer($, { ...cur, isUp: up, at: await $.clock.now() });
+}
+
+/** 「ブラウザで見る」の本体。戻り値は人に見せる一言 */
+async function viewInBrowser($: Dollar): Promise<string> {
+  const base = await $.session.cwd().catch(() => null);
+  let packageJson: string | null = null;
+  let envText: string | null = null;
+  const lockfiles: string[] = [];
+  if (base !== null) {
+    try {
+      packageJson = await $.fs.read(`${base}/package.json`);
+    } catch {
+      packageJson = null;
+    }
+    try {
+      envText = await $.fs.read(`${base}/.env`);
+    } catch {
+      envText = null;
+    }
+    for (const lf of ["pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock", "package-lock.json"]) {
+      try {
+        if (await $.fs.exists(`${base}/${lf}`)) lockfiles.push(lf);
+      } catch {
+        // 無視
+      }
+    }
+  }
+  const plan = planDev(packageJson, lockfiles, envText);
+
+  // 1. もう動いている？
+  const known = await readServer($);
+  const ports = known !== null ? [known.port, ...plan.ports.filter((p) => p !== known.port)] : plan.ports;
+  const upPort = await findUp($, ports);
+  if (upPort !== null) {
+    await setServer($, { port: upPort, url: urlOf(upPort), isUp: true, isStarting: false, command: plan.command, at: await $.clock.now() });
+    ensurePoller($);
+    const opened = await openBrowser($, urlOf(upPort));
+    const text = opened ? t("server.opened", { url: urlOf(upPort) }) : t("server.upNoBrowser", { url: urlOf(upPort) });
+    await notify($, CAT.done, text);
+    return text;
+  }
+
+  // 2. 起動方法が分からない → Claude に頼む文を次の瞬間に送る
+  if (plan.command === null) {
+    const text = t("server.unknown");
+    await notify($, CAT.think, text);
+    $.clock.after(0, () => {
+      void $.prompt.submit({ text: t("prompt.startServer") }).catch((err) => $.ui.log(`送信に失敗: ${String(err)}`, { to: "debug" }));
+    });
+    return text;
+  }
+
+  // 3. 起動して、立ち上がりを待って開く
+  const port = plan.ports[0] ?? 3000;
+  await setServer($, { port, url: urlOf(port), isUp: false, isStarting: true, command: plan.command, at: await $.clock.now() });
+  startupTries = 0;
+  ensurePoller($);
+  try {
+    await $.tool.call({ tool: "Bash", command: plan.command, run_in_background: true, description: t("server.toolDescription") } as never);
+  } catch (err) {
+    $.ui.log(`開発サーバーの起動に失敗: ${String(err)}`, { to: "debug" });
+    await setServer($, null);
+    const text = t("server.startFailed", { error: short(String(err), 60) });
+    await notify($, CAT.error, text);
+    return text;
+  }
+  const text = t("server.starting", { command: plan.command, url: urlOf(port) });
+  await notify($, CAT.web, text);
+  return text;
+}
+
+
 // ---------- 登録 ----------
 
 export const register: Register = (on) => {
+  on("command.run", { command: "miru" }, async ($) => ({ text: await viewInBrowser($) }));
+
+  // Claude が自分で開発サーバーを起動したときも、光る印を出す
+  on("tool.call", { tool: "Bash" }, async ($, e, next) => {
+    const result = await next(e);
+    const cmd = String((e as unknown as { command?: string }).command ?? "");
+    if ((e as unknown as { agentId?: string }).agentId === undefined && /\b(npm|pnpm|yarn|bun)\s+(run\s+)?(dev|start|serve)\b|\b(next|vite|astro|nuxt)\s+dev\b|\bnpx\s+(next|vite|astro)\b/.test(cmd)) {
+      const cur = await readServer($);
+      if (cur === null || !cur.isUp) {
+        const base = await $.session.cwd().catch(() => null);
+        let pkg: string | null = null;
+        try {
+          pkg = base === null ? null : await $.fs.read(`${base}/package.json`);
+        } catch {
+          pkg = null;
+        }
+        const plan = planDev(pkg, [], null);
+        const port = plan.ports[0] ?? 3000;
+        await setServer($, { port, url: urlOf(port), isUp: false, isStarting: true, command: cmd, at: await $.clock.now() });
+        startupTries = 0;
+        ensurePoller($);
+      }
+    }
+    return result;
+  });
+
   on("command.run", { command: "panel" }, async ($) => {
     const r = await openPanel($, "panel");
     return { text: r.isPlaced ? t("panel.opened") : t("panel.waiting", { reason: r.reason ?? "" }) };
@@ -592,7 +783,15 @@ export const register: Register = (on) => {
 
     // ---------- 操作盤 ----------
     if (tab === "panel") {
+      const server = ((await $.state.get(SERVER)).value as TamacodeServer | null | undefined) ?? null;
       const actions: Array<[string, string, () => void]> = [
+        [
+          "act:miru",
+          "panel.btn.miru",
+          () => {
+            void viewInBrowser($).catch((err) => $.ui.log(`ブラウザで見るに失敗: ${String(err)}`, { to: "debug" }));
+          },
+        ],
         ["act:onegai", "panel.btn.onegai", () => void $.state.set(PANEL_TAB, "onegai")],
         ["act:yomu", "panel.btn.yomu", () => void $.state.set(PANEL_TAB, "yomu")],
         [
@@ -632,6 +831,13 @@ export const register: Register = (on) => {
             </Text>
           </Box>
           <Text dimColor>{t("panel.hint")}</Text>
+          {server !== null && (server.isUp || server.isStarting) ? (
+            <Box marginTop={1}>
+              <Text color="green" bold>
+                {server.isUp ? t("server.panel.up", { url: server.url }) : t("server.panel.starting", { url: server.url })}
+              </Text>
+            </Box>
+          ) : null}
           {busyNote}
           <Box flexDirection="column" marginTop={1}>
             {actions.map(([key, labelKey, onPress]) =>
