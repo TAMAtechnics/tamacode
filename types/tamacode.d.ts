@@ -272,7 +272,13 @@ declare module 'claude-code' {
       /** 用語タブで説明を開いているか */
       termsOpen: boolean;
       /** 「たま」ペインで開いているタブ */
-      paneTab: "terms" | "changes" | "log";
+      paneTab: "panel" | "terms" | "changes" | "yomu" | "onegai" | "modosu" | "tenken" | "log";
+      /** /tama で開いているか */
+      tamaOpen: boolean;
+      /** 帯を出すか（/tama で切り替え。未設定は出す） */
+      bandEnabled: boolean;
+      /** 起動時に自動でペインを開くか（既定オン。$.store の settings にも保存） */
+      autoOpen: boolean;
       /** 直近のターンの 3 行まとめ。無ければ null */
       summary: TamacodeSummary | null;
       /** 帯に出す知らせ。無ければ null */
@@ -283,8 +289,6 @@ declare module 'claude-code' {
       errorInfo: TamacodeErrorInfo | null;
       /** Claude が作業中か（操作盤のボタンを無効にする） */
       isBusy: boolean;
-      /** 操作盤ペインで開いているタブ */
-      panelTab: "panel" | "onegai" | "yomu" | "modosu" | "tenken";
       /** 直近に Read / Edit したファイル（絶対パス、新しい順、最大 10 件） */
       recentFiles: string[];
       /** 【3】保存した説明。新しい順、最大 20 件 */

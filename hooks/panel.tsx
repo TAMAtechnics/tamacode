@@ -9,16 +9,31 @@
 // コマンド名は英数字しか使えない（Claude Code の決まり）ので、ローマ字にしてある。
 
 import type { EngineInterface, Register } from "claude-code";
-import type { TamacodeBackup, TamacodeFinding, TamacodeNotice, TamacodeRead, TamacodeRequest, TamacodeRestore, TamacodeServer, TamacodeTenken, TamacodeWatchStats, TamacodeWizardDraft } from "../types/tamacode";
+import type { TamacodeBackup, TamacodeChange, TamacodeFinding, TamacodeLogEntry, TamacodeNotice, TamacodeRead, TamacodeRequest, TamacodeRestore, TamacodeServer, TamacodeTenken, TamacodeTerms, TamacodeWatchStats, TamacodeWizardDraft } from "../types/tamacode";
 import { planDev, urlOf } from "./server";
 import { CAT, isTurnRunningNow, rel, short } from "./activity";
+import { RISK_FACE, RISK_NOTE } from "./changes";
+import { USER_FILE, buildTerms, serializeUser, setUser, withKnown } from "./terms";
 import { t } from "./locale";
 import { findSecrets, getRules, isExcludedPath, isScannableFile, scanFileText, weekStart, type Finding } from "./watch";
 
-export const PANEL_ID = "panel";
+export const PANE_ID = "tama";
 
 // $.state の参照。plugin と key はリテラルでないと validate が読めない。
-const PANEL_TAB = { plugin: "tamacode", key: "panelTab" } as const;
+const PANE_TAB = { plugin: "tamacode", key: "paneTab" } as const;
+const TAMA_OPEN = { plugin: "tamacode", key: "tamaOpen" } as const;
+const BAND_ENABLED = { plugin: "tamacode", key: "bandEnabled" } as const;
+const AUTO_OPEN = { plugin: "tamacode", key: "autoOpen" } as const;
+const TERMS = { plugin: "tamacode", key: "terms" } as const;
+const TERMS_OPEN = { plugin: "tamacode", key: "termsOpen" } as const;
+const CHANGES = { plugin: "tamacode", key: "changes" } as const;
+const OPEN_ID = { plugin: "tamacode", key: "openId" } as const;
+const LOG = { plugin: "tamacode", key: "log" } as const;
+const STORE_SETTINGS = "settings";
+const CHANGES_LIMIT = 50;
+const LOG_LIMIT = 200;
+const NARROW_PANE_COLUMNS = 44; // これより狭いペインでは操作盤だけ
+const NARROW_TERMINAL_COLUMNS = 110; // これより狭い端末では /tama が操作盤だけで開く
 const BUSY = { plugin: "tamacode", key: "isBusy" } as const;
 const NOTICE = { plugin: "tamacode", key: "notice" } as const;
 const RECENT = { plugin: "tamacode", key: "recentFiles" } as const;
@@ -47,15 +62,19 @@ const GIT_LOG_LIMIT = 10;
 const SUMMARY_MODEL = "haiku";
 
 type Dollar = EngineInterface;
-type PanelTab = "panel" | "onegai" | "yomu" | "modosu" | "tenken";
+type PanelTab = "panel" | "terms" | "changes" | "yomu" | "onegai" | "modosu" | "tenken" | "log";
 
 const TABS: Array<[PanelTab, string]> = [
   ["panel", "panel.tab.panel"],
-  ["onegai", "panel.tab.onegai"],
+  ["terms", "panel.tab.terms"],
+  ["changes", "panel.tab.changes"],
   ["yomu", "panel.tab.yomu"],
+  ["onegai", "panel.tab.onegai"],
   ["modosu", "panel.tab.modosu"],
   ["tenken", "panel.tab.tenken"],
+  ["log", "panel.tab.log"],
 ];
+const ALL_TABS: PanelTab[] = TABS.map(([id]) => id);
 
 // ---------- 送る文（純粋） ----------
 
@@ -101,9 +120,9 @@ async function isBusy($: Dollar): Promise<boolean> {
 }
 
 async function readTab($: Dollar): Promise<PanelTab> {
-  const got = await $.state.get(PANEL_TAB);
+  const got = await $.state.get(PANE_TAB);
   const v = got.value;
-  return v === "onegai" || v === "yomu" || v === "modosu" || v === "tenken" || v === "panel" ? v : "panel";
+  return typeof v === "string" && (ALL_TABS as string[]).includes(v) ? (v as PanelTab) : "terms";
 }
 
 async function notify($: Dollar, face: string, text: string): Promise<void> {
@@ -138,8 +157,8 @@ async function send($: Dollar, text: string, fromButton = false): Promise<boolea
 }
 
 async function openPanel($: Dollar, tab: PanelTab): Promise<{ isPlaced: boolean; reason?: string }> {
-  await $.state.set(PANEL_TAB, tab);
-  const opened = await $.ui.open({ id: PANEL_ID, title: t("panel.title"), focus: true, closeOnEscape: true, columns: 64, rows: 28 });
+  await $.state.set(PANE_TAB, tab);
+  const opened = await $.ui.open({ id: PANE_ID, title: t("pane.title"), focus: true, closeOnEscape: true, columns: 64, rows: 28 });
   return opened.isPlaced ? { isPlaced: true } : { isPlaced: false, reason: opened.reason };
 }
 
@@ -190,6 +209,58 @@ async function readDraft($: Dollar): Promise<TamacodeWizardDraft> {
   const got = await $.state.get(DRAFT);
   const v = got.value as Partial<TamacodeWizardDraft> | null | undefined;
   return v && typeof v === "object" ? { what: String(v.what ?? ""), where: String(v.where ?? ""), success: String(v.success ?? "") } : { ...EMPTY_DRAFT };
+}
+
+const pad2 = (n: number): string => String(n).padStart(2, "0");
+const hhmm = (ms: number): string => {
+  const d = new Date(ms);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+};
+
+// 語を「知ってる」にする: 辞書を差し替え、ファイルに保存し、今の用語を拾い直す。
+// （$.command.run で /terms know を呼ぶと自分のプラグインのフックは飛ばされて届かないので、ここで直接やる）
+async function knowTerm($: Dollar, term: string): Promise<void> {
+  const next = withKnown(term);
+  setUser(next);
+  let home: string | undefined;
+  try {
+    home = await $.env.get("HOME");
+  } catch {
+    home = undefined;
+  }
+  if (home) await $.fs.write(`${home.replace(/[\\/]+$/, "")}/${USER_FILE}`, serializeUser(next));
+  const cur = await readTerms($);
+  if (cur !== null) await $.state.set(TERMS, buildTerms(cur.answer, cur.outputs, await $.clock.now()));
+}
+
+async function readTerms($: Dollar): Promise<TamacodeTerms | null> {
+  const got = await $.state.get(TERMS);
+  const v = got.value as Partial<TamacodeTerms> | null | undefined;
+  if (!v || typeof v !== "object" || !Array.isArray(v.found)) return null;
+  return { at: v.at ?? 0, answer: v.answer ?? "", outputs: Array.isArray(v.outputs) ? v.outputs : [], found: v.found };
+}
+
+// ---------- 設定（起動時に自動で開くか。既定はオン） ----------
+
+async function readAutoOpen($: Dollar): Promise<boolean> {
+  const got = await $.state.get(AUTO_OPEN);
+  if (typeof got.value === "boolean") return got.value;
+  try {
+    const saved = (await $.store.get(STORE_SETTINGS)) as { autoOpen?: boolean } | undefined;
+    return saved?.autoOpen !== false;
+  } catch {
+    return true;
+  }
+}
+
+async function setAutoOpen($: Dollar, on: boolean): Promise<void> {
+  await $.state.set(AUTO_OPEN, on);
+  try {
+    const saved = ((await $.store.get(STORE_SETTINGS)) as Record<string, unknown> | undefined) ?? {};
+    await $.store.set(STORE_SETTINGS, { ...saved, autoOpen: on });
+  } catch (err) {
+    $.ui.log(`設定の保存に失敗: ${String(err)}`, { to: "debug" });
+  }
 }
 
 // ---------- 【1】おねがい ----------
@@ -692,6 +763,37 @@ export const register: Register = (on) => {
     return result;
   });
 
+  // /tama: 帯オン＋ペインを開く。もう一度で全部閉じる。/tama auto on|off で起動時に自動で開くか
+  on("command.run", { command: "tama" }, async ($, e) => {
+    const arg = String(e.args ?? "").trim();
+    if (/^auto\b/.test(arg)) {
+      const word = arg.replace(/^auto\s*/, "").trim().toLowerCase();
+      if (word !== "on" && word !== "off") {
+        const cur = await readAutoOpen($);
+        return { text: t("tama.auto.usage", { state: cur ? "on" : "off" }) };
+      }
+      await setAutoOpen($, word === "on");
+      return { text: word === "on" ? t("tama.auto.on") : t("tama.auto.off") };
+    }
+    let isOpen = false;
+    try {
+      isOpen = (await $.ui.panes()).some((p) => p.id === PANE_ID && p.isShown);
+    } catch {
+      isOpen = (await $.state.get(TAMA_OPEN)).value === true;
+    }
+    if (isOpen) {
+      await $.ui.close({ id: PANE_ID });
+      await Promise.all([$.state.set(TAMA_OPEN, false), $.state.set(BAND_ENABLED, false)]);
+      return { text: t("tama.closed") };
+    }
+    const narrow = e.presentation.columns < NARROW_TERMINAL_COLUMNS;
+    await Promise.all([$.state.set(BAND_ENABLED, true), $.state.set(PANE_TAB, narrow ? "panel" : "terms")]);
+    const opened = await $.ui.open({ id: PANE_ID, title: t("pane.title"), focus: true, closeOnEscape: true, columns: narrow ? 48 : 64, rows: 28 });
+    await $.state.set(TAMA_OPEN, true);
+    $.ui.invalidate("ui.render");
+    return { text: opened.isPlaced ? t("tama.opened") : t("tama.waiting", { reason: opened.reason }) };
+  });
+
   on("command.run", { command: "panel" }, async ($) => {
     const r = await openPanel($, "panel");
     return { text: r.isPlaced ? t("panel.opened") : t("panel.waiting", { reason: r.reason ?? "" }) };
@@ -742,7 +844,7 @@ export const register: Register = (on) => {
     return { text: (await send($, buildCheckPrompt())) ? t("check.sent") : t("panel.sendFailed", { error: "" }) };
   });
 
-  on("ui.render", { component: "Pane", requestId: PANEL_ID }, async ($, e) => {
+  on("ui.render", { component: "Pane", requestId: PANE_ID }, async ($, e) => {
     // 入力欄（Input）と選択（Select）はスマホ画面には無い
     if (e.surface === "mobile") {
       const { Box, Text } = $.ui.resolve(e);
@@ -752,10 +854,12 @@ export const register: Register = (on) => {
         </Box>
       );
     }
-    const { Box, Text, Button, Input, Select } = $.ui.resolve(e);
-    const [tab, busy] = await Promise.all([readTab($), isBusy($)]);
+    const { Box, Text, Button, Input, Select, Code } = $.ui.resolve(e);
+    const narrow = e.props.bodyColumns < NARROW_PANE_COLUMNS; // 狭いときは操作盤だけ（タブも隠す）
+    const [storedTab, busy] = await Promise.all([readTab($), isBusy($)]);
+    const tab: PanelTab = narrow ? "panel" : storedTab;
 
-    const tabs = (
+    const tabs = narrow ? null : (
       <Box>
         {TABS.map(([id, key], i) => (
           <Box>
@@ -765,7 +869,7 @@ export const register: Register = (on) => {
               key={`ptab:${id}`}
               label={id === tab ? `●${t(key)}` : `○${t(key)}`}
               onPress={() => {
-                void $.state.set(PANEL_TAB, id);
+                void $.state.set(PANE_TAB, id);
                 if (id === "modosu") void loadRestore($);
               }}
             />
@@ -781,6 +885,165 @@ export const register: Register = (on) => {
       </Box>
     ) : null;
 
+    // ---------- 用語 ----------
+    if (tab === "terms") {
+      const [cur, openGot] = await Promise.all([readTerms($), $.state.get(TERMS_OPEN)]);
+      const found = cur?.found ?? [];
+      const isOpen = openGot.value === true;
+      return (
+        <Box flexDirection="column" paddingX={1}>
+          {tabs}
+          <Box marginTop={1}>
+            <Text bold>📘 用語（新しい語が上）　</Text>
+            {found.length > 0 ? (
+              <Button
+                plain
+                key="terms:toggle"
+                label={isOpen ? "説明をたたむ" : "説明を開く"}
+                onPress={() => {
+                  void $.state.set(TERMS_OPEN, !isOpen);
+                }}
+              />
+            ) : null}
+          </Box>
+          <Text dimColor>語を押すと「知ってる」になり次から出ません。＊はツールの出力から、†は自分の辞書</Text>
+          <Box>
+            {busy ? (
+              <Text dimColor>{t("panel.btn.kantan")}（{t("panel.busy")}）</Text>
+            ) : (
+              <Button
+                key="terms:kantan"
+                label={t("panel.btn.kantan")}
+                onPress={() => {
+                  void send($, buildSimplePrompt(), true);
+                }}
+              />
+            )}
+          </Box>
+          {cur === null ? (
+            <Box marginTop={1}>
+              <Text dimColor>{CAT.sleep} Claude の返事やツールのエラーが出ると、ここに専門用語が並びます。</Text>
+            </Box>
+          ) : found.length === 0 ? (
+            <Box marginTop={1}>
+              <Text dimColor>この返事に、辞書にある専門用語はありませんでした。</Text>
+            </Box>
+          ) : (
+            <Box flexDirection="column" marginTop={1}>
+              {found.map((t) => (
+                <Box flexDirection="column">
+                  <Box>
+                    <Button
+                      plain
+                      key={`know:${t.term}`}
+                      label={t.term}
+                      onPress={() => {
+                        void knowTerm($, t.term).catch((err) => {
+                          $.ui.log(`「知ってる」に失敗（${t.term}）: ${String(err)}`, { to: "debug" });
+                        });
+                      }}
+                    />
+                    {t.from === "tool" ? <Text dimColor>＊</Text> : null}
+                    {t.isUser ? <Text dimColor>†</Text> : null}
+                    {!isOpen ? (
+                      <Text dimColor wrap="truncate-end">
+                        　{t.meaning}
+                      </Text>
+                    ) : null}
+                  </Box>
+                  {isOpen ? (
+                    <Box paddingLeft={2}>
+                      <Text wrap="wrap">{t.meaning}</Text>
+                    </Box>
+                  ) : null}
+                </Box>
+              ))}
+            </Box>
+          )}
+        </Box>
+      );
+    }
+
+    // ---------- 変更 ----------
+    if (tab === "changes") {
+      const [cGot, oGot] = await Promise.all([$.state.get(CHANGES), $.state.get(OPEN_ID)]);
+      const list = Array.isArray(cGot.value) ? (cGot.value as TamacodeChange[]) : [];
+      const openId = typeof oGot.value === "string" ? oGot.value : null;
+      return (
+        <Box flexDirection="column" paddingX={1}>
+          {tabs}
+          <Box marginTop={1}>
+            <Text bold>📜 変更（新しい順・最大{CHANGES_LIMIT}件）</Text>
+          </Box>
+          <Text dimColor>押すと元の差分を開閉。{RISK_FACE} は壊れると困る所</Text>
+          {list.length === 0 ? (
+            <Box marginTop={1}>
+              <Text dimColor>{CAT.sleep} まだ変更はありません。</Text>
+            </Box>
+          ) : (
+            list.map((c) => {
+              const isOpen = openId === c.id;
+              const label = `${c.isRisky ? `${RISK_FACE} ` : ""}${isOpen ? "▾" : "▸"} ${hhmm(c.at)}  ${c.name}  +${c.added}行 −${c.removed}行`;
+              const summary = c.summary === null ? (c.isRisky ? RISK_NOTE : "") : `${c.summary}${c.isRisky ? ` ${RISK_NOTE}` : ""}`;
+              return (
+                <Box flexDirection="column" marginTop={1}>
+                  <Button
+                    plain
+                    key={`row:${c.id}`}
+                    label={label}
+                    onPress={() => {
+                      void $.state.set(OPEN_ID, isOpen ? null : c.id);
+                    }}
+                  />
+                  {summary !== "" ? (
+                    <Box paddingLeft={2}>
+                      <Text wrap="wrap">{summary}</Text>
+                    </Box>
+                  ) : null}
+                  {isOpen ? (
+                    <Box flexDirection="column" paddingLeft={2} marginTop={1}>
+                      {c.diff === "" ? <Text dimColor>（中身に変化はありませんでした）</Text> : <Code source={c.diff} format="diff" path={c.file} />}
+                      {c.isTruncated ? <Text dimColor>…長いので途中まで表示しています</Text> : null}
+                    </Box>
+                  ) : null}
+                </Box>
+              );
+            })
+          )}
+        </Box>
+      );
+    }
+
+    // ---------- やったこと ----------
+    if (tab === "log") {
+    const lGot = await $.state.get(LOG);
+    const log = Array.isArray(lGot.value) ? (lGot.value as TamacodeLogEntry[]) : [];
+    return (
+      <Box flexDirection="column" paddingX={1}>
+        {tabs}
+        <Box marginTop={1}>
+          <Text bold>{CAT.idle} やったこと（新しい順・最大{LOG_LIMIT}件）</Text>
+        </Box>
+        <Text dimColor>同じことが続いたときは ×n にまとめています</Text>
+        {log.length === 0 ? (
+          <Box marginTop={1}>
+            <Text dimColor>{CAT.sleep} まだ何もしていません。</Text>
+          </Box>
+        ) : (
+          <Box flexDirection="column" marginTop={1}>
+            {log.map((l) => (
+              <Text wrap="truncate-end">
+                <Text dimColor>{hhmm(l.at)} </Text>
+                {l.text}
+                {l.count > 1 ? <Text dimColor> ×{l.count}</Text> : null}
+              </Text>
+            ))}
+          </Box>
+        )}
+      </Box>
+    );
+    }
+
     // ---------- 操作盤 ----------
     if (tab === "panel") {
       const server = ((await $.state.get(SERVER)).value as TamacodeServer | null | undefined) ?? null;
@@ -792,13 +1055,13 @@ export const register: Register = (on) => {
             void viewInBrowser($).catch((err) => $.ui.log(`ブラウザで見るに失敗: ${String(err)}`, { to: "debug" }));
           },
         ],
-        ["act:onegai", "panel.btn.onegai", () => void $.state.set(PANEL_TAB, "onegai")],
-        ["act:yomu", "panel.btn.yomu", () => void $.state.set(PANEL_TAB, "yomu")],
+        ["act:onegai", "panel.btn.onegai", () => void $.state.set(PANE_TAB, "onegai")],
+        ["act:yomu", "panel.btn.yomu", () => void $.state.set(PANE_TAB, "yomu")],
         [
           "act:modosu",
           "panel.btn.modosu",
           () => {
-            void $.state.set(PANEL_TAB, "modosu");
+            void $.state.set(PANE_TAB, "modosu");
             void loadRestore($);
           },
         ],
@@ -815,7 +1078,7 @@ export const register: Register = (on) => {
           "act:tenken",
           "tenken.btn",
           () => {
-            void $.state.set(PANEL_TAB, "tenken");
+            void $.state.set(PANE_TAB, "tenken");
             void runTenken($);
           },
         ],

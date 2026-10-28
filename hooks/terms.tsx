@@ -391,11 +391,12 @@ async function onSessionStart($: Dollar): Promise<void> {
   } catch (err) {
     $.ui.log(`/terms の登録に失敗: ${String(err)}`, { to: "debug" });
   }
-  // 画面が広ければ勝手に右側へ出る。狭ければ /terms で開く（isPlaced: false ですぐ返るので待っても止まらない）。
+  // 起動時に自動で開く（/tama auto off にしていれば開かない）。画面が広ければ右側へ出て、狭ければ待機する
   try {
-    await $.ui.open({ id: PANE_ID, title: "たま", columns: 48 });
+    const saved = (await $.store.get("settings")) as { autoOpen?: boolean } | undefined;
+    if (saved?.autoOpen !== false) await $.ui.open({ id: PANE_ID, title: "たま", columns: 48 });
   } catch (err) {
-    $.ui.log(`用語ペインを開けません: ${String(err)}`, { to: "debug" });
+    $.ui.log(`ペインを開けません: ${String(err)}`, { to: "debug" });
   }
 }
 

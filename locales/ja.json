@@ -227,5 +227,15 @@
   "server.panel.up": "🟢 サーバー起動中 {url}",
   "server.panel.starting": "⏳ 起動中… {url}",
   "panel.btn.miru": "ブラウザで見る（作ったものを開く。動いていなければ起動する）",
-  "prompt.startServer": "開発サーバーを起動して（裏で動かしたままにして）、立ち上がったら見るための住所（http://localhost:ポート番号）を教えて。"
+  "prompt.startServer": "開発サーバーを起動して（裏で動かしたままにして）、立ち上がったら見るための住所（http://localhost:ポート番号）を教えて。",
+  "pane.title": "たま",
+  "panel.tab.terms": "用語",
+  "panel.tab.changes": "変更",
+  "panel.tab.log": "履歴",
+  "tama.opened": "たまを開きました（帯オン＋右のペイン）。もう一度 /tama で全部閉じます",
+  "tama.closed": "たまを閉じました（帯もオフ）。/tama でまた開けます",
+  "tama.waiting": "ペインは待機中です（{reason}）。帯はオンにしました",
+  "tama.auto.on": "起動時に自動で開くようにしました",
+  "tama.auto.off": "起動時には開かないようにしました（/tama で開けます）",
+  "tama.auto.usage": "使い方: /tama auto on または /tama auto off（今は {state}）"
 }

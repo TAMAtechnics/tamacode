@@ -43,6 +43,7 @@ const WATCH_BLOCK = { plugin: "tamacode", key: "watchBlock" } as const;
 const WATCH_WARNINGS = { plugin: "tamacode", key: "watchWarnings" } as const;
 const WATCH_ALLOW = { plugin: "tamacode", key: "watchAllow" } as const;
 const PENDING_PROMPT = { plugin: "tamacode", key: "pendingPrompt" } as const;
+const BAND_ENABLED = { plugin: "tamacode", key: "bandEnabled" } as const;
 const RECENT_LIMIT = 10;
 const READS_LIMIT = 20;
 const PANE_TAB = { plugin: "tamacode", key: "paneTab" } as const;
@@ -931,13 +932,19 @@ export const register: Register = (on) => {
 
   // 入力欄の上の帯: 今やってること＋待ってていいか（1 行、上書き。あなたの番なら黄色）＋ 迷走の注意
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
-    const [now, wGot, nGot, perm, errInfo, bGot, wsGot, clock] = await Promise.all([readNow($), $.state.get(WANDER), $.state.get(NOTICE), readPermission($), readErrorInfo($), $.state.get(WATCH_BLOCK), $.state.get(WATCH_WARNINGS), $.clock.now()]);
-    const shown = e.props.isWorking && now !== null && now.text !== "" ? judge(now, clock) : null;
-    const w = (wGot.value as TamacodeWander | null | undefined) ?? null;
-    const notice = (nGot.value as TamacodeNotice | null | undefined) ?? null;
-    const errShown = e.props.isWorking ? errInfo : null;
+    const [now, wGot, nGot, perm, errInfo, bGot, wsGot, enabledGot, clock] = await Promise.all([readNow($), $.state.get(WANDER), $.state.get(NOTICE), readPermission($), readErrorInfo($), $.state.get(WATCH_BLOCK), $.state.get(WATCH_WARNINGS), $.state.get(BAND_ENABLED), $.clock.now()]);
+    // /tama で帯をオフにしているときは、見張りが止めた物だけ出す（安全のため）
+    if (enabledGot.value === false) {
+      const onlyBlock = (bGot.value as TamacodeFinding | null | undefined) ?? null;
+      if (onlyBlock === null || e.props.hasSurvey) return next(e);
+    }
+    const bandOff = enabledGot.value === false;
+    const shown = !bandOff && e.props.isWorking && now !== null && now.text !== "" ? judge(now, clock) : null;
+    const w = bandOff ? null : ((wGot.value as TamacodeWander | null | undefined) ?? null);
+    const notice = bandOff ? null : ((nGot.value as TamacodeNotice | null | undefined) ?? null);
+    const errShown = !bandOff && e.props.isWorking ? errInfo : null;
     const block = (bGot.value as TamacodeFinding | null | undefined) ?? null;
-    const warnings = Array.isArray(wsGot.value) ? (wsGot.value as TamacodeFinding[]) : [];
+    const warnings = bandOff ? [] : Array.isArray(wsGot.value) ? (wsGot.value as TamacodeFinding[]) : [];
     if (e.props.hasSurvey || (shown === null && w === null && notice === null && errShown === null && block === null && warnings.length === 0)) return next(e);
 
     // 見張りのボタン: 直す（Claude に修正を頼む。作業中なら終わってから送る）／このまま通す（1 回だけ通し、やり直しを頼む）／やめる

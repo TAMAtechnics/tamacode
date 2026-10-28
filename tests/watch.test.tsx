@@ -5,7 +5,7 @@ import type { On } from "claude-code";
 import { evaluateBash, evaluateWrite, findSecrets, isPublicRepoCommand, isProdDestructive, tablesWithoutRls } from "../hooks/watch";
 
 const BAND = { hasSurvey: false, isWorking: true, maxRows: 12, bodyColumns: 140 } as any;
-const PANE_PROPS = { title: "操作盤", isFocused: true, bodyColumns: 64, placement: "dock", scroll: { top: 0 }, view: {} } as any;
+const PANE_PROPS = { title: "たま", isFocused: true, bodyColumns: 64, placement: "dock", scroll: { top: 0 }, view: {} } as any;
 const RUN = { origin: { kind: "composer" }, presentation: { isFullscreen: true, columns: 120 } } as const;
 const T0 = new Date(2026, 9, 29, 15, 30, 12).getTime();
 
@@ -194,7 +194,7 @@ test("点検: 全体を見て赤・黄・緑に分け、冒頭に今週の回数
 
   expect((await $.command.run({ command: "tenken", args: "", ...RUN })).text).toBe("点検を始めました。結果は「点検」タブに出ます");
   await rec.clock.advance(0);
-  let ui = await $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "Pane", requestId: "panel", props: PANE_PROPS });
+  let ui = await $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "Pane", requestId: "tama", props: PANE_PROPS });
   let texts = (await ui.findAll({ type: "Text" })).map((t) => t.text);
   expect(texts).toContain("今週止めた事故：1件　警告：0件");
   expect(texts.some((t) => t.includes("app/page.tsx の 1 行目に秘密の鍵らしい文字列があります"))).toBe(true);

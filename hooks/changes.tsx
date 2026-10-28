@@ -386,6 +386,7 @@ async function onSessionStart($: Dollar): Promise<void> {
   for (const cmd of [
     { name: "changes", description: "変更履歴ペインを開く（やさしい日本語の要約つき）" },
     { name: "log", description: "やったことの履歴ペインを開く（帯に出た一言の履歴）" },
+    { name: "tama", description: "帯とペイン（用語・操作盤…）をまとめて開く／もう一度で全部閉じる。/tama auto on|off で起動時に開くか" },
     { name: "panel", description: "操作盤を開く（おねがい・読む・戻す・おわり・もっと簡単に・確認して）" },
     { name: "onegai", description: "おねがいウィザード（何を・どこで・成功の条件 を埋めて頼む）" },
     { name: "yomu", description: "読む（最近のファイルをプログラムを知らない人向けに説明してもらう）" },
