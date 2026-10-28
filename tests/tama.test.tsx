@@ -19,7 +19,7 @@ test("/tama で帯オン＋ペイン（用語タブ）が開き、もう一度�
   expect((await $.command.run({ command: "tama", args: "", ...run(120) })).text).toBe("たまを開きました（帯オン＋右のペイン）。もう一度 /tama で全部閉じます");
   expect(pane.opens).toEqual(["tama"]);
   let ui = await mountPanel($);
-  expect((await ui.findAll({ type: "Button" })).some((b: any) => String(b.props?.label ?? "") === "●用語")).toBe(true);
+  expect((await ui.findAll({ type: "Button" })).some((b: any) => String(b.props?.label ?? "") === "[用語]")).toBe(true);
   await ui.unmount();
 
   // 帯はオン

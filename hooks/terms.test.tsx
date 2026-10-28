@@ -127,7 +127,7 @@ test("自分の辞書（ファイル）は組み込みより優先され、known
   const ui = await mountPane($);
   expect(await terms(ui)).toEqual(["デプロイ", "たまコード"]);
   expect((await ui.findAll({ type: "Text" })).some((t) => t.text.includes("うちでは「公開」のこと。"))).toBe(true);
-  expect(await ui.find({ type: "Text", text: "†" })).toBeDefined();
+  expect(await ui.find({ type: "Text", text: "+" })).toBeDefined();
 });
 
 test("辞書ファイルが壊れていても止まらず、組み込み辞書で動く", async ($, on) => {
@@ -248,7 +248,7 @@ test("ツールの出力（エラー文）に出た用語も拾う。返事の�
   await $.tool.call({ tool: "Bash", command: "npm test" });
   let ui = await mountPane($);
   expect(await terms(ui)).toEqual(["npm", "マイグレーション", "ORM", "スキーマ"]);
-  expect(await ui.find({ type: "Text", text: "＊" })).toBeDefined();
+  expect(await ui.find({ type: "Text", text: "*" })).toBeDefined();
   await ui.unmount();
 
   await $.tool.call({ tool: "Bash", command: "npm run build" });

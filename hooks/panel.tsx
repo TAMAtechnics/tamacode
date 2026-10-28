@@ -867,7 +867,7 @@ export const register: Register = (on) => {
             <Button
               plain
               key={`ptab:${id}`}
-              label={id === tab ? `●${t(key)}` : `○${t(key)}`}
+              label={id === tab ? `[${t(key)}]` : ` ${t(key)} `}
               onPress={() => {
                 void $.state.set(PANE_TAB, id);
                 if (id === "modosu") void loadRestore($);
@@ -906,7 +906,7 @@ export const register: Register = (on) => {
               />
             ) : null}
           </Box>
-          <Text dimColor>語を押すと「知ってる」になり次から出ません。＊はツールの出力から、†は自分の辞書</Text>
+          <Text dimColor>語を押すと「知ってる」になり次から出ません。* はツールの出力から、+ は自分の辞書</Text>
           <Box>
             {busy ? (
               <Text dimColor>{t("panel.btn.kantan")}（{t("panel.busy")}）</Text>
@@ -943,8 +943,8 @@ export const register: Register = (on) => {
                         });
                       }}
                     />
-                    {t.from === "tool" ? <Text dimColor>＊</Text> : null}
-                    {t.isUser ? <Text dimColor>†</Text> : null}
+                    {t.from === "tool" ? <Text dimColor>*</Text> : null}
+                    {t.isUser ? <Text dimColor>+</Text> : null}
                     {!isOpen ? (
                       <Text dimColor wrap="truncate-end">
                         　{t.meaning}
