@@ -9,6 +9,7 @@
 // 要約の呼び出しが失敗しても、要約なし（ファイル名＋行数だけ）で止まらない。
 
 import type { EngineInterface, Register } from "claude-code";
+import { LOCALE_FILE, USER_LOCALE_FILE, applyLocale, markLocaleLoaded } from "./locale";
 
 type Change = {
   id: string;
@@ -43,8 +44,8 @@ export const RISK_NOTE = "※壊れると困る所です。不安なら戻して
 export const RISK_FACE = "(=｀･q･´=)ﾉ"; // 危ない操作の猫（activity.tsx の CAT.danger と同じ顔）
 
 // 危険判定: パスと変更行（+/-）に対して当てる
-const RISK_PATH_RULES: RegExp[] = [/(^|[\\/])\.env(\.|$)/i];
-const RISK_TEXT_RULES: RegExp[] = [
+export const RISK_PATH_RULES: RegExp[] = [/(^|[\\/])\.env(\.|$)/i, /(^|[\\/])migrations?([\\/]|$)/i];
+export const RISK_TEXT_RULES: RegExp[] = [
   /\b(rm|rmdir|rimraf|unlink)\b/i,
   /\b(delete|remove|drop|destroy|truncate|purge)\b|削除/i,
   /\b(database|db|sql|prisma|supabase|migration|migrate|schema|mongo|postgres|mysql|sqlite)\b|データベース/i,
@@ -335,8 +336,36 @@ async function summarize($: Dollar, change: Change): Promise<void> {
 
 // ---------- 登録 ----------
 
-// 起動時: store から読み戻し、/changes と /log を登録
+// 文言ファイルを読んで上書きする（プラグインの場所の locales/ja.json → ~/.claude/tamacode-ja.json の順）
+async function loadLocale($: Dollar): Promise<void> {
+  // $.env.get は名前をリテラルで書く決まり（validate が読むため）
+  const candidates: string[] = [];
+  try {
+    const root = await $.env.get("CLAUDE_PLUGIN_ROOT");
+    if (root) candidates.push(`${root.replace(/[\\/]+$/, "")}/${LOCALE_FILE}`);
+  } catch {
+    // 無ければ飛ばす
+  }
+  try {
+    const home = await $.env.get("HOME");
+    if (home) candidates.push(`${home.replace(/[\\/]+$/, "")}/${USER_LOCALE_FILE}`);
+  } catch {
+    // 無ければ飛ばす
+  }
+  for (const path of candidates) {
+    try {
+      const n = applyLocale(await $.fs.read(path));
+      if (n > 0) $.ui.log(`文言を読みました: ${path}（${n} 件）`, { to: "debug" });
+    } catch {
+      // ファイルが無いのはふつう
+    }
+  }
+  markLocaleLoaded();
+}
+
+// 起動時: 文言を読み、store から読み戻し、/changes と /log を登録
 async function onSessionStart($: Dollar): Promise<void> {
+  await loadLocale($);
   try {
     await ensureLoaded($);
   } catch (err) {

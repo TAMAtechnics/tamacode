@@ -19,7 +19,8 @@
 // ツールの実行は一切止めない（見せるだけ）。
 
 import type { EngineInterface, Register } from "claude-code";
-import type { TamacodeLogEntry, TamacodeNow, TamacodeSummary, TamacodeTerms, TamacodeWander } from "../types/tamacode";
+import type { TamacodeLogEntry, TamacodeNotice, TamacodeNow, TamacodeSummary, TamacodeTerms, TamacodeWander } from "../types/tamacode";
+import { t } from "./locale";
 import { buildTerms, pickErrorLines } from "./terms";
 
 // $.state の参照。plugin と key はリテラルでないと validate が読めない。
@@ -28,6 +29,7 @@ const LOG = { plugin: "tamacode", key: "log" } as const;
 const WANDER = { plugin: "tamacode", key: "wander" } as const;
 const TERMS = { plugin: "tamacode", key: "terms" } as const;
 const SUMMARY = { plugin: "tamacode", key: "summary" } as const;
+const NOTICE = { plugin: "tamacode", key: "notice" } as const;
 const PANE_TAB = { plugin: "tamacode", key: "paneTab" } as const;
 
 const PANE_ID = "tama";
@@ -42,7 +44,7 @@ const TOKEN_WRITE_MS = 1000; // 文字の増加で state を書く間隔（毎�
 const SUMMARY_MODEL = "haiku";
 const SUMMARY_MIN_ANSWER = 40; // これより短い返事はまとめない
 const SUMMARY_MAX_CHARS = 6000;
-const MESSAGE = "迷ってるかも。目的をもう一度言い直すか、/plan で整理すると抜けやすいです";
+const MESSAGE = (): string => t("wander.message");
 
 // 猫の顔（状態ごと）
 export const CAT = {
@@ -345,21 +347,21 @@ export function judge(now: TamacodeNow, clock: number): Verdict {
   let isYourTurn = false;
   if (now.phase === "waiting") {
     face = CAT.sleep;
-    verdict = "あなたの番です。上を見て";
+    verdict = t("band.yourTurn");
     isYourTurn = true;
   } else if (now.phase === "running" && now.isLong) {
-    verdict = "時間がかかる作業なので待ってOK";
+    verdict = t("band.waitLong");
   } else if (silence > ESC_MS) {
     face = CAT.stopped;
-    verdict = "Escで止めて続きを頼むのが安全";
+    verdict = t("band.esc");
   } else if (silence > STALL_MS) {
     face = CAT.error;
-    verdict = "動いてないかも";
+    verdict = t("band.stall");
   } else if (now.phase === "writing") {
-    verdict = "書き出し中なので待ってOK";
+    verdict = t("band.waitWriting");
   }
   // 帯の時間は「最後に動きがあってから」。Spinner の時間（ターン開始から）と区別がつくように言葉を添える
-  const line = `${face} ${now.text}　最後の動き ${jpDuration(silence)}前${verdict === "" ? "" : `　${verdict}`}`;
+  const line = `${face} ${now.text}　${t("band.lastMove", { time: jpDuration(silence) })}${verdict === "" ? "" : `　${verdict}`}`;
   return { face, line, verdict, isYourTurn };
 }
 
@@ -480,7 +482,7 @@ const flag = async ($: Dollar, w: TamacodeWander) => {
   await $.state.set(WANDER, w);
   if (!hasToasted) {
     hasToasted = true;
-    $.ui.toast(`${CAT.lost} ${MESSAGE}`);
+    $.ui.toast(`${CAT.lost} ${MESSAGE()}`);
   }
 };
 
@@ -592,7 +594,7 @@ export const register: Register = (on) => {
       });
     }
     const at = await $.clock.now();
-    await Promise.all([$.state.set(WANDER, null), $.state.set(NOW, null), forgetOutputs($, at)]);
+    await Promise.all([$.state.set(WANDER, null), $.state.set(NOW, null), $.state.set(NOTICE, null), forgetOutputs($, at)]);
     return next(e);
   });
 
@@ -658,7 +660,7 @@ export const register: Register = (on) => {
   on("classic.PermissionRequest", async ($, e, next) => {
     try {
       const desc = describeTool(String(e.tool_name ?? ""), (e.tool_input ?? {}) as Record<string, unknown>, cwd);
-      await setNow($, { phase: "waiting", face: CAT.sleep, text: `許可を待ってる: ${desc.text}`, tool: e.tool_name, isLong: false }, { log: true });
+      await setNow($, { phase: "waiting", face: CAT.sleep, text: `${t("band.waitingPermission")}: ${desc.text}`, tool: e.tool_name, isLong: false }, { log: true });
     } catch (err) {
       $.ui.log(`許可待ちの表示に失敗: ${String(err)}`, { to: "debug" });
     }
@@ -671,7 +673,7 @@ export const register: Register = (on) => {
       try {
         const cur = await readNow($);
         if (cur === null || cur.phase !== "waiting") {
-          await setNow($, { phase: "waiting", face: CAT.sleep, text: "許可を待ってる", tool: null, isLong: false }, { log: true });
+          await setNow($, { phase: "waiting", face: CAT.sleep, text: t("band.waitingPermission"), tool: null, isLong: false }, { log: true });
         }
       } catch (err) {
         $.ui.log(`許可待ちの表示に失敗: ${String(err)}`, { to: "debug" });
@@ -705,12 +707,12 @@ export const register: Register = (on) => {
     // 結果: 止められた / エラー / ふつうに終わって次を考えている
     try {
       if (r.deny !== undefined) {
-        await setNow($, { phase: "between", face: CAT.stopped, text: `止めました: ${short(r.deny, 50)}`, tool: like.tool, isLong: false }, { log: true });
+        await setNow($, { phase: "between", face: CAT.stopped, text: t("band.stopped", { reason: short(r.deny, 50) }), tool: like.tool, isLong: false }, { log: true });
       } else if (r.isError === true) {
         const head = errorHeadline(resultText(r));
-        await setNow($, { phase: "between", face: CAT.error, text: `エラーが出ました${head === "" ? "" : `: ${head}`}`, tool: like.tool, isLong: false }, { log: true });
+        await setNow($, { phase: "between", face: CAT.error, text: t("band.error", { head: head === "" ? "" : `: ${head}` }), tool: like.tool, isLong: false }, { log: true });
       } else {
-        await setNow($, { phase: "between", face: CAT.think, text: "次を考えてる", tool: null, isLong: false });
+        await setNow($, { phase: "between", face: CAT.think, text: t("band.thinkingNext"), tool: null, isLong: false });
       }
     } catch (err) {
       $.ui.log(`結果の表示に失敗: ${String(err)}`, { to: "debug" });
@@ -736,14 +738,22 @@ export const register: Register = (on) => {
 
   // 入力欄の上の帯: 今やってること＋待ってていいか（1 行、上書き。あなたの番なら黄色）＋ 迷走の注意
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
-    const [now, wGot, clock] = await Promise.all([readNow($), $.state.get(WANDER), $.clock.now()]);
+    const [now, wGot, nGot, clock] = await Promise.all([readNow($), $.state.get(WANDER), $.state.get(NOTICE), $.clock.now()]);
     const shown = e.props.isWorking && now !== null && now.text !== "" ? judge(now, clock) : null;
     const w = (wGot.value as TamacodeWander | null | undefined) ?? null;
-    if (e.props.hasSurvey || (shown === null && w === null)) return next(e);
+    const notice = (nGot.value as TamacodeNotice | null | undefined) ?? null;
+    if (e.props.hasSurvey || (shown === null && w === null && notice === null)) return next(e);
 
     const { Box, Text, Button } = $.ui.resolve(e);
     return (
       <Box flexDirection="column" paddingX={1}>
+        {notice !== null ? (
+          <Box>
+            <Text color={notice.face === CAT.danger ? "red" : "green"} wrap="truncate-end">
+              {notice.face} {notice.text}
+            </Text>
+          </Box>
+        ) : null}
         {shown !== null ? (
           <Box>
             <Text color={shown.isYourTurn ? "yellow" : "cyan"} bold={shown.isYourTurn} wrap="truncate-end">
@@ -755,7 +765,7 @@ export const register: Register = (on) => {
           <Box flexDirection="column">
             <Box>
               <Text color="yellow" bold>
-                {CAT.lost} {MESSAGE}
+                {CAT.lost} {MESSAGE()}
               </Text>
             </Box>
             <Box>

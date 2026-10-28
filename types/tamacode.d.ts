@@ -101,6 +101,38 @@ export type TamacodeSummary = {
   isLoading: boolean;
 };
 
+/** 帯に出す知らせ（控えを取った、今日はここまで、など）。次のターンが始まるまで残る */
+export type TamacodeNotice = {
+  /** 猫 */
+  face: string;
+  /** 文 */
+  text: string;
+  /** 出した時刻（エポックミリ秒） */
+  at: number;
+};
+
+/** 自動バックアップ 1 件（.tama-backup/<日時>/） */
+export type TamacodeBackup = {
+  /** フォルダ名（2026-10-29_153012） */
+  stamp: string;
+  /** フォルダの絶対パス */
+  dir: string;
+  /** files: ファイルのコピー / stash: git stash のスナップショット / none: 控える物が無かった（git 管理外など） */
+  kind: "files" | "stash" | "none";
+  /** コピーしたファイル（控えの中の相対パス） */
+  files: string[];
+  /** stash のコミット id。無ければ null */
+  stashSha: string | null;
+  /** なぜ控えたか（日本語） */
+  reason: string;
+  /** きっかけの道具 */
+  tool: string;
+  /** 対象（ファイル名やコマンド） */
+  target: string;
+  /** 取った時刻（エポックミリ秒） */
+  at: number;
+};
+
 /** /log ペインに並べる1行 */
 export type TamacodeLogEntry = {
   /** 最後にこの行を出した時刻（エポックミリ秒） */
@@ -126,6 +158,10 @@ declare module 'claude-code' {
       paneTab: "terms" | "changes" | "log";
       /** 直近のターンの 3 行まとめ。無ければ null */
       summary: TamacodeSummary | null;
+      /** 帯に出す知らせ。無ければ null */
+      notice: TamacodeNotice | null;
+      /** 自動バックアップの一覧。新しい順、最大 100 件 */
+      backups: TamacodeBackup[];
       /** 迷走検知。何も無ければ null */
       wander: TamacodeWander | null;
       /** 今やってること。ターンが終わると null */
