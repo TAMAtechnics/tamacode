@@ -11,6 +11,8 @@
 import type { EngineInterface, Register } from "claude-code";
 import { LOCALE_FILE, USER_LOCALE_FILE, applyLocale, markLocaleLoaded } from "./locale";
 import { applyRules } from "./watch";
+import { LOGO, applyVibeConfig, firstLineOf, getVibeConfig } from "./vibe";
+import { t } from "./locale";
 
 type Change = {
   id: string;
@@ -30,7 +32,8 @@ type Op = { kind: " " | "+" | "-"; text: string };
 
 // $.state の参照。plugin と key はリテラルでないと validate が読めない。
 const CHANGES = { plugin: "tamacode", key: "changes" } as const;
-const PANE_TAB = { plugin: "tamacode", key: "paneTab" } as const; // 「たま」ペインのタブ（描画は pane.tsx）
+const PANE_TAB = { plugin: "tamacode", key: "paneTab" } as const; // 「たま」ペインのタブ（描画は panel.tsx）
+const NOTICE_REF = { plugin: "tamacode", key: "notice" } as const; // 起動ロゴを帯に出すため
 
 const PANE_ID = "tama";
 const STORE_KEY = "changes";
@@ -363,6 +366,15 @@ async function loadLocale($: Dollar): Promise<void> {
     }
   }
   markLocaleLoaded();
+  // 雰囲気モードの設定（config/vibe.json → ~/.claude/tamacode-vibe.json）
+  for (const path of candidates.map((c) => c.replace(/locales\/ja\.json$/, "config/vibe.json").replace(/tamacode-ja\.json$/, "tamacode-vibe.json"))) {
+    try {
+      const n = applyVibeConfig(await $.fs.read(path));
+      if (n > 0) $.ui.log(`雰囲気モードの設定を読みました: ${path}（${n} 項目）`, { to: "debug" });
+    } catch {
+      // 無いのはふつう
+    }
+  }
   // 見張りのルール（rules/security.json → ~/.claude/tamacode-rules.json）
   for (const path of candidates.map((c) => c.replace(/locales\/ja\.json$/, "rules/security.json").replace(/tamacode-ja\.json$/, "tamacode-rules.json"))) {
     try {
@@ -396,6 +408,7 @@ async function onSessionStart($: Dollar): Promise<void> {
     { name: "kakunin", description: "確認して（ビルドとテストを回して合格か不合格かと原因を一言で）" },
     { name: "tenken", description: "点検（秘密の鍵の直書き・誰でも見えるテーブル・本人確認の無い入口などを探す）" },
     { name: "miru", description: "ブラウザで見る（作ったものを開く。開発サーバーが動いていなければ起動して開く）" },
+    { name: "kakkoii", description: "雰囲気モードのオン・オフ（琥珀色の HUD と進捗バー。帯のやさしい日本語はそのまま）" },
   ]) {
     try {
       await $.command.register(cmd);
@@ -403,7 +416,33 @@ async function onSessionStart($: Dollar): Promise<void> {
       $.ui.log(`/${cmd.name} の登録に失敗: ${String(err)}`, { to: "debug" });
     }
   }
+  // 雰囲気モードがオンなら起動ロゴ（1 秒ごとに 3 段階。全部実データ: 前回の docs/次回.md の 1 行目）
+  try {
+    const saved = (await $.store.get("settings")) as { vibe?: boolean } | undefined;
+    if (saved?.vibe === true && getVibeConfig().bootAnimation) {
+      let lastLine: string | null = null;
+      try {
+        const cwd = await $.session.cwd();
+        lastLine = firstLineOf(await $.fs.read(`${cwd}/docs/次回.md`));
+      } catch {
+        lastLine = null;
+      }
+      const logo = LOGO.join("\n");
+      const steps = [logo, `${logo}\n${t("boot.online")}`, `${logo}\n${t("boot.online")}\n${lastLine === null ? t("boot.noLastTime") : t("boot.lastTime", { line: lastLine })}`];
+      steps.forEach((text, i) => {
+        $.clock.after(i * 1000, () => {
+          void (async () => {
+            await $.state.set(NOTICE_REF, { face: "(=^･q･^=)", text, at: await $.clock.now() });
+            $.ui.invalidate("ui.render");
+          })();
+        });
+      });
+    }
+  } catch (err) {
+    $.ui.log(`起動ロゴに失敗: ${String(err)}`, { to: "debug" });
+  }
 }
+
 
 export const register: Register = (on) => {
   on("session.start", async ($, e, next) => {

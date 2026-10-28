@@ -12,6 +12,7 @@
 - **「たま」ペイン**: 用語（一言説明）／変更（やさしい 2 文の要約）／やったこと の 3 タブ
 - **ひと区切り**: 返事が終わると「やったこと／確認の仕方／次にやること」の 3 行
 - **迷走検知**: 同じファイルを読みすぎ・同じエラーを繰り返しているときに「迷ってるかも」
+- **雰囲気モード（/kakkoii）**: 琥珀色の HUD（SESSION / TOKENS / FILES / EDITS / ERRORS と直近の道具のログ）と帯の進捗バー。数字は全部実データ
 - Spinner（`Flowing…`）を猫だけに、完了行（`Crunched for 4s`）を「4秒で完了」に
 
 > **注意**: この plugin の中心は Claude Code の **hooks module（function hooks）** という早期アクセス機能です。
@@ -50,6 +51,7 @@ claude plugin install tamacode@tamacode-marketplace
 | `/kakunin` | 確認して。ビルドとテストを回して合格／不合格と原因を一言で |
 | `/tenken` | 点検。秘密の鍵の直書き・誰でも見えるテーブル・本人確認の無い入口などを探す |
 | `/miru` | ブラウザで見る。作ったものを開く。開発サーバーが動いていなければ起動して開く |
+| `/kakkoii` | 雰囲気モードのオン・オフ（HUD と進捗バー。やさしい日本語の帯はそのまま） |
 | `/terms` `/changes` `/log` | 「たま」ペインの 用語 / 変更 / 履歴 タブを開く |
 
 ## 構成
@@ -60,6 +62,7 @@ claude plugin install tamacode@tamacode-marketplace
 | `.claude-plugin/marketplace.json` | ローカルマーケットプレイスとしてインストールするための定義 |
 | `locales/ja.json` | **全部の文言**。書き換えて差し替えられる（下の「文言とルールの差し替え」） |
 | `rules/security.json` | **見張りの判定ルール**。パターン・対象フォルダを書き換えられる |
+| `config/vibe.json` | **雰囲気モードの設定**（色・ログの行数・起動演出の有無・バーの刻み） |
 | `hooks/hooks.json` | フック定義（SessionStart）と hooks module の指定（`modules`） |
 | `hooks/tamacode.tsx` | hooks module の入口。下の各ファイルの `register` をまとめて呼ぶ |
 | `hooks/activity.tsx` | 帯（今やってること・待ってていいか）・許可とエラーの翻訳の表示・3 行まとめ・迷走検知・Spinner |
@@ -68,6 +71,7 @@ claude plugin install tamacode@tamacode-marketplace
 | `hooks/permission.ts` / `hooks/errors.ts` | 許可・エラーの翻訳（規則の即答と、モデルの返事の整形） |
 | `hooks/panel.tsx` | 「たま」ペイン（操作盤／用語／変更／読む／おねがい／戻す／点検／履歴 のタブ）、/tama、/miru、各コマンド |
 | `hooks/server.ts` | 「ブラウザで見る」の見当付け（起動コマンドとポート） |
+| `hooks/vibe.ts` / `hooks/hud.tsx` | 雰囲気モード: 設定・HUD の文字と SVG・進捗バー・ロゴ（純粋）／HUD ペインと /kakkoii |
 | `hooks/terms.tsx` / `hooks/changes.tsx` | 用語辞書と抽出 / 変更の記録と要約（コマンド登録・文言とルールの読み込みもここ） |
 | `hooks/locale.ts` / `hooks/locale.defaults.ts` | 文言の取り出し口 `t()` と、ja.json から生成した初期値 |
 | `hooks/rules.defaults.ts` | security.json から生成した初期値 |
@@ -80,7 +84,8 @@ claude plugin install tamacode@tamacode-marketplace
 
 - 文言は `locales/ja.json`。`{name}` は差し込み。自分用の言い換えは `~/.claude/tamacode-ja.json` に置くとそちらが優先
 - 見張りのルールは `rules/security.json`。自分用は `~/.claude/tamacode-rules.json`
-- どちらも起動時に読み込みます。初期値をコードにも焼き込みたいときは `node scripts/build-locale.mjs` / `node scripts/build-rules.mjs`
+- 雰囲気モードの設定は `config/vibe.json`。自分用は `~/.claude/tamacode-vibe.json`
+- どれも起動時に読み込みます。初期値をコードにも焼き込みたいときは `node scripts/build-locale.mjs` / `build-rules.mjs` / `build-vibe.mjs`
 - 用語辞書（`BUILTIN`）と道具の名前（`describeTool`）はコードの中です
 
 ## 帯: 今なにをしているか・待ってていいか
@@ -188,6 +193,16 @@ localhost・ポート・開発サーバーを知らなくても「作ったも�
 3. 起動方法が分からなければ Claude に「開発サーバーを起動して…」と頼む文を送る
 
 動いている間は画面下の状態行に **「🟢 サーバー起動中 localhost:3000」** が光り続け（10 秒ごとに確認）、操作盤にも緑の行が出ます。Claude が自分で `npm run dev` を打ったときも光ります。
+
+## 雰囲気モード（/kakkoii）
+
+`/kakkoii` でオン・オフ（`$.store` に残る）。やさしい日本語の帯は常にそのままで、次が足されます。
+
+- **HUD ペイン**（右側、等幅・琥珀色の単色・細い罫線）。上段は SESSION（セッションの経過時間）／TOKENS（入出力トークンの累計。キャッシュ分も入力に含む）／FILES（読んだファイル数、重複なし）／EDITS（編集回数）／ERRORS（失敗した道具の数）。1 秒ごとに更新。下段は直近の道具呼び出しのファイルパスとコマンド（新しいものが上、既定 10 行）
+- **帯の進捗バー** `[████░░░░]`。書き出し中はこのターンの出力トークン（既定 200 トークンで 1 マス）、道具の実行中は経過秒（既定 10 秒で 1 マス）。横に実数（`412 tok` / `25s`）
+- **起動演出**（オンのときだけ）: ASCII ロゴ → 「TAMA SYSTEM ONLINE」→ 前回の `docs/次回.md` の 1 行目 を 1 秒間隔で帯に
+- **Desktop アプリ**では HUD を SVG で描き、トークンの棒は前回の値からなめらかに動きます（数字そのものは文字）。ターミナルでは文字で描きます
+- 数字はすべて実データ。トークンは `turn.step` の stop と `turn.complete` の usage から数え、二重に足しません。見せかけの％やダミーはありません
 
 ## 見張り（AI 不使用。パターン照合だけ）
 

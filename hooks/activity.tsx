@@ -23,6 +23,8 @@ import type { TamacodeErrorInfo, TamacodeFinding, TamacodeLogEntry, TamacodeNoti
 import { errorGuess, errorLines, errorPrompt, looksLikeError, parseErrorLines, errorHeadline as errorHeadlineLong } from "./errors";
 import { t } from "./locale";
 import { parsePermission, permissionGuess, permissionLines, permissionPrompt } from "./permission";
+import { EMPTY_STATS, barForNow, getVibeConfig, logLineFor } from "./vibe";
+import type { TamacodeVibeStats } from "../types/tamacode";
 import { buildTerms, pickErrorLines } from "./terms";
 
 // $.state の参照。plugin と key はリテラルでないと validate が読めない。
@@ -44,6 +46,10 @@ const WATCH_WARNINGS = { plugin: "tamacode", key: "watchWarnings" } as const;
 const WATCH_ALLOW = { plugin: "tamacode", key: "watchAllow" } as const;
 const PENDING_PROMPT = { plugin: "tamacode", key: "pendingPrompt" } as const;
 const BAND_ENABLED = { plugin: "tamacode", key: "bandEnabled" } as const;
+const VIBE_ON = { plugin: "tamacode", key: "vibeOn" } as const;
+const VIBE_STATS = { plugin: "tamacode", key: "vibeStats" } as const;
+const VIBE_LOG = { plugin: "tamacode", key: "vibeLog" } as const;
+const VIBE_FILES_LIMIT = 1000;
 const RECENT_LIMIT = 10;
 const READS_LIMIT = 20;
 const PANE_TAB = { plugin: "tamacode", key: "paneTab" } as const;
@@ -498,6 +504,31 @@ async function explainPermission($: Dollar, tool: string, input: Record<string, 
   });
 }
 
+// ---------- 雰囲気モードの集計（HUD の数字。全部実データ） ----------
+
+let turnIn = 0; // このターンで turn.step の stop から数えた入力トークン
+let turnOut = 0; // 同じく出力トークン
+
+async function readVibeStats($: Dollar): Promise<TamacodeVibeStats> {
+  const got = await $.state.get(VIBE_STATS);
+  const v = got.value as TamacodeVibeStats | null | undefined;
+  return v && typeof v === "object" && Array.isArray(v.filesRead) ? v : EMPTY_STATS;
+}
+
+async function updateVibeStats($: Dollar, fn: (s: TamacodeVibeStats) => TamacodeVibeStats): Promise<void> {
+  const cur = await readVibeStats($);
+  await $.state.set(VIBE_STATS, fn(cur));
+}
+
+async function pushVibeLog($: Dollar, text: string, at: number): Promise<void> {
+  const got = await $.state.get(VIBE_LOG);
+  const list = Array.isArray(got.value) ? (got.value as Array<{ at: number; text: string }>) : [];
+  await $.state.set(VIBE_LOG, [{ at, text }, ...list].slice(0, Math.max(10, getVibeConfig().logLines)));
+}
+
+const sumIn = (u: { input_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }): number =>
+  u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
+
 // ---------- 見張りのボタンから Claude に頼む ----------
 
 // 作業中なら turn.complete で送る。終わっていれば今すぐ送る
@@ -711,6 +742,20 @@ export const register: Register = (on) => {
     errors = new Map();
     hasToasted = false;
     isTurnRunning = true;
+    turnIn = 0;
+    turnOut = 0;
+    try {
+      let startedAt = 0;
+      try {
+        startedAt = (await $.session.usage()).startedAt;
+      } catch {
+        startedAt = 0;
+      }
+      const now0 = await $.clock.now();
+      await updateVibeStats($, (s) => ({ ...s, startedAt: s.startedAt > 0 ? s.startedAt : startedAt > 0 ? startedAt : now0, turnOutputTokens: 0 }));
+    } catch (err) {
+      $.ui.log(`HUD の集計に失敗: ${String(err)}`, { to: "debug" });
+    }
     lastPrompt = e.text;
     lastTokenText = "";
     if (ticker === null) {
@@ -776,6 +821,16 @@ export const register: Register = (on) => {
       } catch (err) {
         $.ui.log(`「おわり」の知らせに失敗: ${String(err)}`, { to: "debug" });
       }
+      // HUD: ターンの使用量のうち、turn.step で数えきれなかった分を足す（二重に数えない）
+      try {
+        if (e.usage) {
+          const dIn = Math.max(0, sumIn(e.usage) - turnIn);
+          const dOut = Math.max(0, e.usage.output_tokens - turnOut);
+          if (dIn > 0 || dOut > 0) await updateVibeStats($, (s) => ({ ...s, inputTokens: s.inputTokens + dIn, outputTokens: s.outputTokens + dOut }));
+        }
+      } catch (err) {
+        $.ui.log(`HUD の集計に失敗: ${String(err)}`, { to: "debug" });
+      }
       if (e.reason === "answer" && e.answer.trim().length >= SUMMARY_MIN_ANSWER) {
         const req = { turnId: e.turnId, durationMs: e.durationMs, prompt: lastPrompt, answer: e.answer };
         await $.state.set(SUMMARY, { turnId: e.turnId, durationMs: e.durationMs, at: await $.clock.now(), lines: null, isLoading: true } satisfies TamacodeSummary);
@@ -813,6 +868,12 @@ export const register: Register = (on) => {
           const json = (jsonByBlock.get(chunk.index) ?? "") + chunk.json;
           jsonByBlock.set(chunk.index, json.length > 4000 ? json.slice(0, 4000) : json);
           text = prepText(toolByBlock.get(chunk.index) ?? "", extractTarget(json), cwd);
+        } else if (chunk.kind === "stop" && chunk.usage) {
+          // HUD: 実際に使ったトークン（1 ステップ分）
+          const u = chunk.usage;
+          turnIn += sumIn(u);
+          turnOut += u.output_tokens;
+          await updateVibeStats($, (s) => ({ ...s, inputTokens: s.inputTokens + sumIn(u), outputTokens: s.outputTokens + u.output_tokens, turnOutputTokens: s.turnOutputTokens + u.output_tokens }));
         }
         if (text !== null) {
           const wall = Date.now();
@@ -877,6 +938,22 @@ export const register: Register = (on) => {
       await setNow($, { phase: desc.isWaiting ? "waiting" : "running", face: desc.face, text: desc.text, tool: like.tool, isLong: desc.isLong }, { log: true });
     }
     for (const f of desc.readFiles) await countRead($, f);
+    // HUD: 下段のログと、読んだファイル・編集回数
+    try {
+      const input0 = like as unknown as Record<string, unknown>;
+      await pushVibeLog($, logLineFor(like.tool, input0, (p) => rel(p, cwd)), at);
+      const isEdit = ["Edit", "Write", "MultiEdit", "NotebookEdit"].includes(like.tool);
+      const readFiles = like.tool === "Read" && typeof input0.file_path === "string" ? [input0.file_path] : desc.readFiles;
+      if (isEdit || readFiles.length > 0) {
+        await updateVibeStats($, (s) => ({
+          ...s,
+          edits: s.edits + (isEdit ? 1 : 0),
+          filesRead: readFiles.length === 0 ? s.filesRead : Array.from(new Set([...s.filesRead, ...readFiles])).slice(-VIBE_FILES_LIMIT),
+        }));
+      }
+    } catch (err) {
+      $.ui.log(`HUD の集計に失敗: ${String(err)}`, { to: "debug" });
+    }
     // 【3】読む: 直近に触ったファイルを覚える
     if (["Read", "Edit", "Write", "MultiEdit", "NotebookEdit"].includes(like.tool)) {
       const input = like as unknown as Record<string, unknown>;
@@ -890,6 +967,13 @@ export const register: Register = (on) => {
 
     const result = await next(e);
     const r = result as ToolResultLike;
+    if (r.isError === true) {
+      try {
+        await updateVibeStats($, (s) => ({ ...s, errors: s.errors + 1 }));
+      } catch (err) {
+        $.ui.log(`HUD の集計に失敗: ${String(err)}`, { to: "debug" });
+      }
+    }
 
     // 結果: 止められた / エラー / ふつうに終わって次を考えている
     try {
@@ -932,7 +1016,9 @@ export const register: Register = (on) => {
 
   // 入力欄の上の帯: 今やってること＋待ってていいか（1 行、上書き。あなたの番なら黄色）＋ 迷走の注意
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
-    const [now, wGot, nGot, perm, errInfo, bGot, wsGot, enabledGot, clock] = await Promise.all([readNow($), $.state.get(WANDER), $.state.get(NOTICE), readPermission($), readErrorInfo($), $.state.get(WATCH_BLOCK), $.state.get(WATCH_WARNINGS), $.state.get(BAND_ENABLED), $.clock.now()]);
+    const [now, wGot, nGot, perm, errInfo, bGot, wsGot, enabledGot, vibeGot, clock] = await Promise.all([readNow($), $.state.get(WANDER), $.state.get(NOTICE), readPermission($), readErrorInfo($), $.state.get(WATCH_BLOCK), $.state.get(WATCH_WARNINGS), $.state.get(BAND_ENABLED), $.state.get(VIBE_ON), $.clock.now()]);
+    // 雰囲気モード: 進捗バー（書き出し中はこのターンの出力トークン、道具の実行中は経過秒。実データ）
+    const vibeBar = vibeGot.value === true && e.props.isWorking ? barForNow(now, await readVibeStats($), clock) : null;
     // /tama で帯をオフにしているときは、見張りが止めた物だけ出す（安全のため）
     if (enabledGot.value === false) {
       const onlyBlock = (bGot.value as TamacodeFinding | null | undefined) ?? null;
@@ -994,10 +1080,19 @@ export const register: Register = (on) => {
             {CAT.danger} {wn.text}{wn.hint === null ? "" : `　${wn.hint}`}
           </Text>
         ))}
-        {notice !== null ? (
+        {notice !== null
+          ? notice.text.split("\n").map((line, i) => (
+              <Box>
+                <Text color={notice.face === CAT.danger ? "red" : notice.face === CAT.idle ? getVibeConfig().color : "green"} wrap="truncate-end">
+                  {i === 0 ? `${notice.face} ${line}` : line}
+                </Text>
+              </Box>
+            ))
+          : null}
+        {vibeBar !== null ? (
           <Box>
-            <Text color={notice.face === CAT.danger ? "red" : "green"} wrap="truncate-end">
-              {notice.face} {notice.text}
+            <Text color={getVibeConfig().color}>
+              {vibeBar.bar} {vibeBar.label}
             </Text>
           </Box>
         ) : null}

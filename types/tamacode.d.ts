@@ -250,6 +250,24 @@ export type TamacodeServer = {
   at: number;
 };
 
+/** 雰囲気モードの HUD の数字（全部実データ） */
+export type TamacodeVibeStats = {
+  /** セッションの始まり（エポックミリ秒）。0 なら未確定 */
+  startedAt: number;
+  /** 入力トークンの累計（キャッシュ分も含む） */
+  inputTokens: number;
+  /** 出力トークンの累計 */
+  outputTokens: number;
+  /** 読んだファイル（重複なし） */
+  filesRead: string[];
+  /** 編集した回数（Edit / Write / MultiEdit / NotebookEdit） */
+  edits: number;
+  /** 失敗した道具の回数 */
+  errors: number;
+  /** 今のターンの出力トークン（帯の進捗バー用） */
+  turnOutputTokens: number;
+};
+
 /** /log ペインに並べる1行 */
 export type TamacodeLogEntry = {
   /** 最後にこの行を出した時刻（エポックミリ秒） */
@@ -323,6 +341,12 @@ declare module 'claude-code' {
       pendingPrompt: string | null;
       /** 開発サーバーの様子。知らなければ null */
       server: TamacodeServer | null;
+      /** 雰囲気モードがオンか（$.store の settings.vibe にも保存） */
+      vibeOn: boolean;
+      /** HUD の数字 */
+      vibeStats: TamacodeVibeStats;
+      /** HUD 下段: 直近の道具呼び出し（新しい順） */
+      vibeLog: Array<{ at: number; text: string }>;
       /** 自動バックアップの一覧。新しい順、最大 100 件 */
       backups: TamacodeBackup[];
       /** 迷走検知。何も無ければ null */

@@ -237,5 +237,12 @@
   "tama.waiting": "ペインは待機中です（{reason}）。帯はオンにしました",
   "tama.auto.on": "起動時に自動で開くようにしました",
   "tama.auto.off": "起動時には開かないようにしました（/tama で開けます）",
-  "tama.auto.usage": "使い方: /tama auto on または /tama auto off（今は {state}）"
+  "tama.auto.usage": "使い方: /tama auto on または /tama auto off（今は {state}）",
+  "vibe.on": "雰囲気モード オン。右に HUD（計器盤）を出しました。やさしい日本語の帯はそのままです。もう一度 /kakkoii でオフ",
+  "vibe.onWaiting": "雰囲気モード オン。HUD は待機中です（{reason}）。帯に進捗バーが付きます",
+  "vibe.off": "雰囲気モード オフ。HUD を閉じました",
+  "vibe.noLog": "(no calls yet)",
+  "boot.online": "TAMA SYSTEM ONLINE",
+  "boot.lastTime": "前回の続き: {line}",
+  "boot.noLastTime": "前回のメモ（docs/次回.md）はまだありません"
 }

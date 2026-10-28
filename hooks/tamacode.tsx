@@ -12,6 +12,8 @@
 //   - panel.tsx    : 「たま」ペイン（操作盤/用語/変更/読む/おねがい/戻す/点検/履歴 のタブ）と /tama、各コマンド
 //   - watch.ts     : 見張りの判定（純粋。rules/security.json）。道具の前後に当てるのは safety.tsx
 //   - server.ts    : 「ブラウザで見る」の見当付け（純粋）。/miru と状態行の印は panel.tsx
+//   - vibe.ts      : 雰囲気モード（/kakkoii）の純粋な部分（設定・HUD の文字と SVG・進捗バー・ロゴ）
+//   - hud.tsx      : HUD ペインの描画と /kakkoii。集計は activity.tsx、起動ロゴは changes.tsx
 
 import type { Register } from "claude-code";
 import { register as registerChanges } from "./changes";
@@ -19,6 +21,7 @@ import { register as registerTerms } from "./terms";
 import { register as registerActivity } from "./activity";
 import { register as registerSafety } from "./safety";
 import { register as registerPanel } from "./panel";
+import { register as registerVibe } from "./hud";
 
 export const register: Register = (on, options) => {
   registerChanges(on, options);
@@ -26,4 +29,5 @@ export const register: Register = (on, options) => {
   registerActivity(on, options);
   registerSafety(on, options);
   registerPanel(on, options);
+  registerVibe(on, options);
 };
