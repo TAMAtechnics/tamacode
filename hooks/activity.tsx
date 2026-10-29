@@ -1105,10 +1105,11 @@ export const register: Register = (on) => {
           </Text>
         ))}
         {notice !== null
-          ? notice.text.split("\n").map((line, i) => (
+          ? // 複数行（起動ロゴなど）は猫を 1 行目に独立して出す。本文の 1 行目だけ猫の幅ぶんずれて崩れないように
+            (notice.text.includes("\n") ? [notice.face, ...notice.text.split("\n")] : [`${notice.face} ${notice.text}`]).map((line) => (
               <Box>
                 <Text color={notice.face === CAT.danger ? "red" : notice.face === CAT.idle ? getVibeConfig().color : "green"} wrap="truncate-end">
-                  {i === 0 ? `${notice.face} ${line}` : line}
+                  {line}
                 </Text>
               </Box>
             ))

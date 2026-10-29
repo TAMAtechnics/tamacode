@@ -2,7 +2,8 @@
 import { test, expect, mock } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
 import type { On } from "claude-code";
-import { bar, barForNow, ctxGauge, firstLineOf, hms, hudLines, logLineFor, pulseLine, pushHistory, sparkline } from "../hooks/vibe";
+import { LOGO, bar, barForNow, ctxGauge, firstLineOf, hms, hudLines, logLineFor, pulseLine, pushHistory, sparkline } from "../hooks/vibe";
+import { CAT } from "../hooks/activity";
 
 const T0 = 1_800_000_000_000;
 const RUN = { origin: { kind: "composer" }, presentation: { isFullscreen: true, columns: 120 } } as const;
@@ -152,6 +153,20 @@ test("ハッカー風の行: CTX ゲージ・30 秒ごとのスパークライ�
   await rec.clock.advance(12_000);
   texts = (await hudTexts($)).map((t: any) => String(t.text));
   expect(texts).toContain("▶ RUNNING  bash       00:12");
+});
+
+test("起動ロゴ: 猫は独立した 1 行目に出て、ロゴの 1 行目が猫の幅ぶんずれない", async ($, on) => {
+  const rec = setup(on);
+  await $.command.run({ command: "kakkoii", args: "", ...RUN }); // 雰囲気モードをオン（store に残る）
+  await $.session.start({ cwd: "/proj", surface: "terminal", isInteractive: true });
+  await rec.clock.advance(2_000); // 3 段階目まで
+  const ui = await $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "AbovePrompt", props: { hasSurvey: false, isWorking: false, maxRows: 12, bodyColumns: 120 } as any });
+  const texts = (await ui.findAll({ type: "Text" })).map((t) => t.text);
+  await ui.unmount();
+  const i = texts.indexOf(CAT.idle);
+  expect(i).toBeGreaterThanOrEqual(0);
+  expect(texts.slice(i + 1, i + 1 + LOGO.length)).toEqual(LOGO);
+  expect(texts[i + 1 + LOGO.length]).toBe("TAMACODE SYSTEM ONLINE");
 });
 
 test("Desktop では SVG で描く（数字は実データ、棒は前回の値から動く）", async ($, on) => {

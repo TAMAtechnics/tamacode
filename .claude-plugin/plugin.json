@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "tamacode",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "TAMACODE plugin for Claude Code",
   "author": {
     "name": "tama11111",
