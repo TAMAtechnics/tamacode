@@ -155,9 +155,8 @@ test("ハッカー風の行: CTX ゲージ・30 秒ごとのスパークライ�
   expect(texts).toContain("▶ RUNNING  bash       00:12");
 });
 
-test("起動ロゴ: 猫は独立した 1 行目に出て、ロゴの 1 行目が猫の幅ぶんずれない", async ($, on) => {
+test("起動ロゴ: 雰囲気モードがオフ（入れたばかり）でも出る。猫は独立した 1 行目に出て、ロゴの 1 行目が猫の幅ぶんずれない", async ($, on) => {
   const rec = setup(on);
-  await $.command.run({ command: "kakkoii", args: "", ...RUN }); // 雰囲気モードをオン（store に残る）
   await $.session.start({ cwd: "/proj", surface: "terminal", isInteractive: true });
   await rec.clock.advance(2_000); // 3 段階目まで
   const ui = await $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "AbovePrompt", props: { hasSurvey: false, isWorking: false, maxRows: 12, bodyColumns: 120 } as any });

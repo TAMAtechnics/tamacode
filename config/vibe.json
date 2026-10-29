@@ -1,5 +1,5 @@
 {
-  "_comment": "雰囲気モード（/kakkoii）の設定。color は HUD と進捗バーの色（1 色だけ）。logLines は HUD 下段の行数。bootAnimation は起動時の演出。barWidth は帯の進捗バーの幅、tokensPerBlock / secondsPerBlock はバー 1 マスぶんのトークン数・秒数。自分用は ~/.claude/tamacode-vibe.json。書き換えたら scripts/build-vibe.mjs を実行するか、Claude を起動し直してください。",
+  "_comment": "雰囲気モード（/kakkoii）の設定。color は HUD と進捗バーの色（1 色だけ）。logLines は HUD 下段の行数。bootAnimation は起動時の演出（ロゴは雰囲気モードがオフでも出る。false で止まる）。barWidth は帯の進捗バーの幅、tokensPerBlock / secondsPerBlock はバー 1 マスぶんのトークン数・秒数。自分用は ~/.claude/tamacode-vibe.json。書き換えたら scripts/build-vibe.mjs を実行するか、Claude を起動し直してください。",
   "color": "#FFB000",
   "logLines": 10,
   "bootAnimation": true,

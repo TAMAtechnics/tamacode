@@ -416,10 +416,10 @@ async function onSessionStart($: Dollar): Promise<void> {
       $.ui.log(`/${cmd.name} の登録に失敗: ${String(err)}`, { to: "debug" });
     }
   }
-  // 雰囲気モードがオンなら起動ロゴ（1 秒ごとに 3 段階。全部実データ: 前回の docs/次回.md の 1 行目）
+  // 起動ロゴ（1 秒ごとに 3 段階。全部実データ: 前回の docs/次回.md の 1 行目）。入れたばかりの人にも出るよう、雰囲気モードのオン・オフに関係なく出す。
+  // 止めたいときは config/vibe.json の bootAnimation を false に
   try {
-    const saved = (await $.store.get("settings")) as { vibe?: boolean } | undefined;
-    if (saved?.vibe === true && getVibeConfig().bootAnimation) {
+    if (getVibeConfig().bootAnimation) {
       let lastLine: string | null = null;
       try {
         const cwd = await $.session.cwd();
