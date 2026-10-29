@@ -2,7 +2,7 @@
 import { test, expect, mock } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
 import type { On } from "claude-code";
-import { evaluateBash, evaluateWrite, findSecrets, isPublicRepoCommand, isProdDestructive, tablesWithoutRls } from "../hooks/watch";
+import { blockSignature, evaluateBash, evaluateWrite, findSecrets, isPublicRepoCommand, isProdDestructive, tablesWithoutRls } from "../hooks/watch";
 
 const BAND = { hasSurvey: false, isWorking: true, maxRows: 12, bodyColumns: 140 } as any;
 const PANE_PROPS = { title: "たま", isFocused: true, bodyColumns: 64, placement: "dock", scroll: { top: 0 }, view: {} } as any;
@@ -100,6 +100,29 @@ test("1'. 「このまま通す」を押すと、同じ操作は 1 回だけ通�
   expect((r2 as any).result.filePath).toBe("/proj/src/config.ts");
   // 2 回目はまた止まる
   expect(typeof ((await call()) as any).deny).toBe("string");
+  void rec;
+});
+
+test("1''. 止めた操作の印は「規則に当たった区切り」だけ。cd や確認コマンドを前後に足しても同じ操作として通る", async ($, on) => {
+  // 純粋な部分: 前後が違っても同じ印、危険な部分が違えば別の印
+  const a = 'cd "/Users/x/長い長いフォルダ名のプロジェクト" && gh auth status && gh repo create tamacode --public --source=. --push';
+  const b = 'cd "/Users/x/長い長いフォルダ名のプロジェクト" && gh repo create tamacode   --public --source=. --push';
+  const c = 'cd "/Users/x/長い長いフォルダ名のプロジェクト" && gh repo create other --public';
+  expect(blockSignature("public-repo", a, isPublicRepoCommand)).toBe("public-repo:gh repo create tamacode --public --source=. --push");
+  expect(blockSignature("public-repo", b, isPublicRepoCommand)).toBe(blockSignature("public-repo", a, isPublicRepoCommand));
+  expect(blockSignature("public-repo", c, isPublicRepoCommand)).not.toBe(blockSignature("public-repo", a, isPublicRepoCommand));
+  expect(evaluateBash(a)[0]!.sig).toBe(evaluateBash(b)[0]!.sig);
+
+  // 帯で「このまま通す」→ 前に付いていた確認コマンドを外して再実行しても通る
+  const rec = setup(on);
+  await $.turn.start({ text: "公開して", turnId: "t1" });
+  expect(typeof ((await $.tool.call({ tool: "Bash", command: a })) as any).deny).toBe("string");
+  const ui = await $.ui.mount({ plugin: "tamacode", surface: "terminal", component: "AbovePrompt", props: BAND });
+  await ui.press({ key: "watch:allow" });
+  await ui.unmount();
+  expect(((await $.tool.call({ tool: "Bash", command: b })) as any).deny).toBeUndefined();
+  // 1 回通したあとはまた止まる
+  expect(typeof ((await $.tool.call({ tool: "Bash", command: b })) as any).deny).toBe("string");
   void rec;
 });
 

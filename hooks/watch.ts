@@ -168,6 +168,20 @@ export const hasServiceRole = (text: string): boolean => rules.serviceRoleWords.
 /** 公開リポジトリを作る／公開先を足すコマンドか */
 export const isPublicRepoCommand = (cmd: string): boolean => anyMatch(rules.publicRepoPatterns, cmd);
 
+/**
+ * 止めた操作の印（「このまま通す」で同じ操作を見分ける鍵）。
+ * コマンド全体の先頭ではなく、規則に当たった区切り（&& ; || 改行で分けた 1 つ）だけを使う。
+ * cd や確認コマンドを前後に足しても同じ印になり、別の危険操作は別の印になる。
+ */
+export function blockSignature(rule: string, cmd: string, hits: (segment: string) => boolean): string {
+  const segments = String(cmd ?? "")
+    .split(/&&|\|\||;|\r?\n/)
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+  const picked = segments.find(hits) ?? String(cmd ?? "");
+  return `${rule}:${picked.replace(/\s+/g, " ").trim().slice(0, 80)}`;
+}
+
 /** 本番に対する破壊操作か（本番の印と壊す動詞が同じコマンドにある） */
 export function isProdDestructive(cmd: string): boolean {
   const c = String(cmd ?? "");
@@ -291,13 +305,13 @@ export function evaluateBash(cmd: string): Finding[] {
     });
   }
   if (isProdDestructive(cmd)) {
-    out.push({ rule: "prod-destroy", kind: "block", sig: `prod-destroy:${cmd.slice(0, 60)}`, file: null, text: t("watch.prodDestroy.text"), hint: t("watch.prodDestroy.hint"), fixPrompt: null, options: [{ key: "cancel", label: t("watch.btn.cancel"), action: "cancel" }] });
+    out.push({ rule: "prod-destroy", kind: "block", sig: blockSignature("prod-destroy", cmd, (seg) => anyMatch(rules.destructivePatterns, seg)), file: null, text: t("watch.prodDestroy.text"), hint: t("watch.prodDestroy.hint"), fixPrompt: null, options: [{ key: "cancel", label: t("watch.btn.cancel"), action: "cancel" }] });
   }
   if (isPublicRepoCommand(cmd)) {
     out.push({
       rule: "public-repo",
       kind: "block",
-      sig: `public-repo:${cmd.slice(0, 60)}`,
+      sig: blockSignature("public-repo", cmd, isPublicRepoCommand),
       file: null,
       text: t("watch.publicRepo.text"),
       hint: t("watch.publicRepo.hint"),
