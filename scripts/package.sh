@@ -16,8 +16,17 @@ rsync -a \
 cp docs/販売/利用規約.md "$STAGE/tamacode/利用規約.md"
 cp docs/販売/商品説明.md "$STAGE/tamacode/はじめに.md"
 rm -f "$OUT"
-# zip コマンドだと日本語のファイル名が Windows で化けることがあるので、macOS の ditto で作る（UTF-8 の印が付く）
-(cd "$STAGE" && ditto -c -k --sequesterRsrc --keepParent tamacode "$OLDPWD/$OUT")
+# zip / ditto だと日本語のファイル名が Windows で化けたり __MACOSX が混ざったりするので、python3 で作る（UTF-8 の印が付く）
+python3 - "$STAGE" "$OUT" <<'PY'
+import os, sys, zipfile
+stage, out = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+    for root, dirs, files in os.walk(os.path.join(stage, "tamacode")):
+        dirs.sort()
+        for f in sorted(files):
+            p = os.path.join(root, f)
+            z.write(p, os.path.relpath(p, stage))
+PY
 rm -rf "$STAGE"
 echo "作りました: $OUT"
 unzip -l "$OUT" | tail -1
