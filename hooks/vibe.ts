@@ -172,14 +172,22 @@ export function hudSvg(stats: TamacodeVibeStats, prev: TamacodeVibeStats, now: n
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect x="0.5" y="0.5" width="${width - 1}" height="${height - 1}" fill="none" stroke="${color}" stroke-width="1" /><text x="12" y="14" font-family="ui-monospace, Menlo, monospace" font-size="11" fill="${color}" opacity="0.8">TAMA HUD</text>${rows}${bars}<line x1="8" y1="${sepY}" x2="${width - 8}" y2="${sepY}" stroke="${color}" stroke-width="1" opacity="0.6" />${logRows}</svg>`;
 }
 
-/** 起動ロゴ（ASCII） */
-export const LOGO = [
+/** 起動ロゴの文字部分（ASCII、5 行） */
+export const LOGO_TEXT = [
   " _____   _     __  __     _     ____  ___   ____   _____",
   "|_   _| / \\   |  \\/  |   / \\   / ___|/ _ \\ |  _ \\ | ____|",
   "  | |  / _ \\  | |\\/| |  / _ \\ | |   | | | || | | ||  _|",
   "  | | / ___ \\ | |  | | / ___ \\| |___| |_| || |_| || |___",
   "  |_|/_/   \\_\\|_|  |_|/_/   \\_\\\\____|\\___/ |____/ |_____|",
 ];
+
+/** ロゴの右に座る大きい猫（5 行。顔は帯と同じ (=^･q･^=)） */
+export const LOGO_CAT = ["   /\\_/\\", "  (=^･q･^=)", "  (   ~   )", "   (  )  )", "  (__)(__)"];
+
+const LOGO_WIDTH = Math.max(...LOGO_TEXT.map((l) => l.length));
+
+/** 起動ロゴ: 文字の右に猫を並べた 5 行 */
+export const LOGO = LOGO_TEXT.map((l, i) => `${l.padEnd(LOGO_WIDTH)}   ${LOGO_CAT[i] ?? ""}`);
 
 /** docs/次回.md の最初の意味のある 1 行（見出し記号は外す）。無ければ null */
 export function firstLineOf(text: string | null): string | null {
