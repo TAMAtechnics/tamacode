@@ -2,7 +2,7 @@
 import { test, expect, mock } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
 import type { On } from "claude-code";
-import { bar, barForNow, firstLineOf, hms, hudLines, logLineFor } from "../hooks/vibe";
+import { bar, barForNow, ctxGauge, firstLineOf, hms, hudLines, logLineFor, pulseLine, pushHistory, sparkline } from "../hooks/vibe";
 
 const T0 = 1_800_000_000_000;
 const RUN = { origin: { kind: "composer" }, presentation: { isFullscreen: true, columns: 120 } } as const;
@@ -15,7 +15,7 @@ function setup(on: On, opts: { bashTakes?: number } = {}) {
   const clock = mock.clock(on, { now: T0 });
   on("session.start", (_$, e) => ({ cwd: e.cwd }));
   on("session.cwd", () => ({ value: "/proj" }));
-  on("session.usage", () => ({ value: { startedAt: T0 - 60_000, context: { window: 200000 }, rateLimits: [] } }));
+  on("session.usage", () => ({ value: { startedAt: T0 - 60_000, context: { window: 200000, tokens: 76000, percent: 38 }, rateLimits: [] } }));
   on("command.register", (_$, e) => ({ value: { command: e.name } }));
   on("ui.open", (_$, e) => {
     rec.opens.push(e.id);
@@ -116,6 +116,42 @@ test("雰囲気モードをオンのまま起動・再読み込みすると HUD 
   // 再読み込み（session.start がもう一度来る）
   await $.session.start({ cwd: "/proj", surface: "terminal", isInteractive: true });
   expect(rec.opens.filter((id) => id === "hud")).toEqual(["hud", "hud"]);
+});
+
+test("ハッカー風の行: CTX ゲージ・30 秒ごとのスパークライン・道具が動いている間の脈動行（全部実データ）", async ($, on) => {
+  // 純粋な部分
+  expect(ctxGauge(38)).toBe("CTX      [███░░░░░]  38%");
+  expect(ctxGauge(null)).toBe("CTX      [????????]   --");
+  let h = pushHistory(undefined, T0, 100);
+  h = pushHistory(h, T0 + 30_000, 400);
+  h = pushHistory(h, T0 + 60_000, 0); // 0 は足さない
+  expect(h).toHaveLength(2);
+  expect(sparkline(h, T0 + 60_000, 4)).toBe("▁▃█▁"); // 古い順に並ぶ。最後の区間はまだ 0
+  expect(sparkline(undefined, T0, 4)).toBe("▁▁▁▁");
+  expect(pushHistory(h, T0 + 30 * 60_000, 5)).toHaveLength(1); // 20 分より古い物は落ちる
+  const running = { phase: "running" as const, face: "", text: "x", tool: "Bash", isLong: false, startedAt: T0, at: T0 };
+  expect(pulseLine(running, T0 + 12_000)).toBe("▶ RUNNING  bash       00:12");
+  expect(pulseLine(running, T0 + 13_000)).toBe("▷ RUNNING  bash       00:13");
+  expect(pulseLine({ ...running, tool: "mcp__claude-in-chrome__navigate" }, T0)).toBe("▶ RUNNING  claude-in- 00:00");
+  expect(pulseLine({ ...running, phase: "writing", tool: null }, T0 + 5_000)).toBe("▷ WRITING  claude     00:05");
+  expect(pulseLine({ ...running, phase: "between", tool: null }, T0)).toBeNull();
+  expect(pulseLine(null, T0)).toBeNull();
+
+  // HUD に出る: CTX は session.usage から、脈動行は道具が動いている間だけ
+  const rec = setup(on, { bashTakes: 100_000 });
+  await $.command.run({ command: "kakkoii", args: "", ...RUN });
+  await $.turn.start({ text: "ビルドして", turnId: "t1" });
+  let texts = (await hudTexts($)).map((t: any) => String(t.text));
+  expect(texts).toContain("CTX      [███░░░░░]  38%");
+  expect(texts.some((t) => t.startsWith("OUT/30s  "))).toBe(true);
+  expect(texts.some((t) => t.includes("RUNNING"))).toBe(false);
+
+  const call = $.tool.call({ tool: "Bash", command: "npm run build" });
+  void call.catch(() => undefined);
+  await rec.clock.settle();
+  await rec.clock.advance(12_000);
+  texts = (await hudTexts($)).map((t: any) => String(t.text));
+  expect(texts).toContain("▶ RUNNING  bash       00:12");
 });
 
 test("Desktop では SVG で描く（数字は実データ、棒は前回の値から動く）", async ($, on) => {

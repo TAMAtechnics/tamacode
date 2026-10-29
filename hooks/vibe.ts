@@ -70,6 +70,56 @@ export function hudLines(stats: TamacodeVibeStats, now: number): string[] {
   ];
 }
 
+// ---------- ハッカー風の追加行（全部実データ） ----------
+
+const SPARK = "▁▂▃▄▅▆▇█";
+export const HISTORY_KEEP_MS = 20 * 60 * 1000;
+
+/** 出力トークンの履歴に 1 件足して、古い物を落とす */
+export function pushHistory(history: Array<{ at: number; tokens: number }> | undefined, at: number, tokens: number): Array<{ at: number; tokens: number }> {
+  if (tokens <= 0) return (history ?? []).filter((h) => at - h.at <= HISTORY_KEEP_MS);
+  return [...(history ?? []), { at, tokens }].filter((h) => at - h.at <= HISTORY_KEEP_MS);
+}
+
+/** 直近 width 区間（bucketMs ごと）の出力トークン量を ▁▂▃▅▇ で。全部 0 なら ▁ が並ぶ */
+export function sparkline(history: Array<{ at: number; tokens: number }> | undefined, now: number, width = 24, bucketMs = 30_000): string {
+  const buckets = new Array<number>(width).fill(0);
+  for (const h of history ?? []) {
+    const idx = width - 1 - Math.floor((now - h.at) / bucketMs);
+    if (idx >= 0 && idx < width) buckets[idx] = (buckets[idx] ?? 0) + h.tokens;
+  }
+  const max = Math.max(...buckets, 1);
+  return buckets.map((v) => (v <= 0 ? SPARK[0] : SPARK[Math.min(7, 1 + Math.floor((v / max) * 6.999))])).join("");
+}
+
+/** 文脈の窓の使用率 CTX [████░░░░]  38%。分からなければ ? を並べる */
+export function ctxGauge(percent: number | null, width = 8): string {
+  if (percent === null) return `CTX      [${"?".repeat(width)}]   --`;
+  const p = Math.max(0, Math.min(100, Math.round(percent)));
+  return `CTX      ${bar((p / 100) * width, width)} ${String(p).padStart(3)}%`;
+}
+
+/** 道具が動いている間だけ出る脈動行: ▶ RUNNING  bash    00:12（1 秒ごとに ▶ ▷ が交互）。無ければ null */
+export function pulseLine(now: TamacodeNow | null, clock: number): string | null {
+  if (now === null) return null;
+  const tick = Math.floor(clock / 1000) % 2 === 0 ? "▶" : "▷";
+  const elapsed = hms(clock - now.startedAt).slice(3); // mm:ss
+  if (now.phase === "running" && now.tool !== null) {
+    const name = now.tool.replace(/^mcp__([^_]+(?:_[^_]+)*)__.*$/, "$1").toLowerCase();
+    return `${tick} RUNNING  ${name.slice(0, 10).padEnd(10)} ${elapsed}`;
+  }
+  if (now.phase === "writing") return `${tick} WRITING  ${"claude".padEnd(10)} ${elapsed}`;
+  return null;
+}
+
+/** HUD 上段の追加行（CTX ゲージ・スパークライン・脈動行）。順に並べて hudLines の後ろに付ける */
+export function hudExtraLines(stats: TamacodeVibeStats, ctxPercent: number | null, now: TamacodeNow | null, clock: number): string[] {
+  const out = [ctxGauge(ctxPercent), `OUT/30s  ${sparkline(stats.outHistory, clock)}`];
+  const pulse = pulseLine(now, clock);
+  if (pulse !== null) out.push(pulse);
+  return out;
+}
+
 /** 進捗バー [████░░░░] */
 export function bar(filled: number, width: number): string {
   const w = Math.max(1, Math.floor(width));
@@ -94,11 +144,11 @@ export function barForNow(now: TamacodeNow | null, stats: TamacodeVibeStats, clo
 const esc = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 /** Desktop 向け SVG。棒グラフの長さは前回の値から今の値へなめらかに動く（<animate>）。数字は実データのまま文字で描く */
-export function hudSvg(stats: TamacodeVibeStats, prev: TamacodeVibeStats, now: number, log: Array<{ at: number; text: string }>, cfg: VibeConfig = config): string {
+export function hudSvg(stats: TamacodeVibeStats, prev: TamacodeVibeStats, now: number, log: Array<{ at: number; text: string }>, cfg: VibeConfig = config, extra: string[] = []): string {
   const color = esc(cfg.color);
   const width = 360;
   const rowH = 22;
-  const top = hudLines(stats, now);
+  const top = [...hudLines(stats, now), ...extra];
   const maxTok = Math.max(1, stats.inputTokens + stats.outputTokens);
   const barLen = (v: number) => Math.round((Math.max(0, v) / maxTok) * 200);
   const rows = top

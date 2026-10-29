@@ -287,6 +287,8 @@ export type TamacodeVibeStats = {
   errors: number;
   /** 今のターンの出力トークン（帯の進捗バー用） */
   turnOutputTokens: number;
+  /** 出力トークンの履歴（時刻つき。HUD のスパークライン用。直近 20 分だけ残す）。古い state には無い */
+  outHistory?: Array<{ at: number; tokens: number }>;
 };
 
 /** /log ペインに並べる1行 */

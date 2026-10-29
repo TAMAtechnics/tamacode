@@ -8,15 +8,16 @@
 // 設定は config/vibe.json（読み込みは changes.tsx の session.start。起動ロゴもそこ）。
 
 import type { EngineInterface, Register } from "claude-code";
-import type { TamacodeVibeStats } from "../types/tamacode";
+import type { TamacodeNow, TamacodeVibeStats } from "../types/tamacode";
 import { CAT } from "./activity";
 import { t } from "./locale";
-import { EMPTY_STATS, getVibeConfig, hudLines, hudSvg } from "./vibe";
+import { EMPTY_STATS, getVibeConfig, hudExtraLines, hudLines, hudSvg } from "./vibe";
 
 export const HUD_ID = "hud";
 const VIBE_ON = { plugin: "tamacode", key: "vibeOn" } as const;
 const VIBE_STATS = { plugin: "tamacode", key: "vibeStats" } as const;
 const VIBE_LOG = { plugin: "tamacode", key: "vibeLog" } as const;
+const NOW = { plugin: "tamacode", key: "now" } as const; // 脈動行（道具が動いている間だけ）のため
 const STORE_SETTINGS = "settings";
 
 type Dollar = EngineInterface;
@@ -28,6 +29,25 @@ async function readStats($: Dollar): Promise<TamacodeVibeStats> {
   const got = await $.state.get(VIBE_STATS);
   const v = got.value as TamacodeVibeStats | null | undefined;
   return v && typeof v === "object" && Array.isArray(v.filesRead) ? v : EMPTY_STATS;
+}
+
+async function readNow($: Dollar): Promise<TamacodeNow | null> {
+  const got = await $.state.get(NOW);
+  const v = got.value as TamacodeNow | null | undefined;
+  return v && typeof v === "object" && typeof v.text === "string" ? v : null;
+}
+
+/** 文脈の窓の使用率（%）。取れなければ null */
+async function readCtxPercent($: Dollar): Promise<number | null> {
+  try {
+    const u = await $.session.usage();
+    const c = u.context;
+    if (typeof c.percent === "number") return c.percent;
+    if (typeof c.tokens === "number" && c.window > 0) return (c.tokens / c.window) * 100;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 async function readOn($: Dollar): Promise<boolean> {
@@ -109,18 +129,19 @@ export const register: Register = (on) => {
 
   on("ui.render", { component: "Pane", requestId: HUD_ID }, async ($, e) => {
     const cfg = getVibeConfig();
-    const [stats, logGot, now] = await Promise.all([readStats($), $.state.get(VIBE_LOG), $.clock.now()]);
+    const [stats, logGot, now, nowState, ctxPercent] = await Promise.all([readStats($), $.state.get(VIBE_LOG), $.clock.now(), readNow($), readCtxPercent($)]);
     const log = Array.isArray(logGot.value) ? (logGot.value as Array<{ at: number; text: string }>) : [];
     if (await readOn($)) startTicker($);
+    const extra = hudExtraLines(stats, ctxPercent, nowState, now);
 
     // Desktop などの遠い画面は SVG で（棒は前回の値からなめらかに）
     if (e.surface !== "terminal") {
       const { Box, Svg } = $.ui.resolve(e);
-      const src = hudSvg(stats, prevStats, now, log, cfg);
+      const src = hudSvg(stats, prevStats, now, log, cfg, extra);
       prevStats = stats;
       return (
         <Box paddingX={1}>
-          <Svg source={src} alt={`TAMA HUD: ${hudLines(stats, now).join(" / ")}`} width={360} />
+          <Svg source={src} alt={`TAMA HUD: ${[...hudLines(stats, now), ...extra].join(" / ")}`} width={360} />
         </Box>
       );
     }
@@ -139,6 +160,11 @@ export const register: Register = (on) => {
         </Text>
         {hudLines(stats, now).map((l) => (
           <Text color={color}>{l}</Text>
+        ))}
+        {extra.map((l) => (
+          <Text color={color} bold={l.startsWith("▶") || l.startsWith("▷")}>
+            {l}
+          </Text>
         ))}
         <Text color={color} dimColor>
           {"─".repeat(Math.max(8, Math.min(60, e.props.bodyColumns - 4)))}

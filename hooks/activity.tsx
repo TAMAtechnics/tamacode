@@ -23,7 +23,7 @@ import type { TamacodeErrorInfo, TamacodeFinding, TamacodeLive, TamacodeLogEntry
 import { buildErrorInfo, errorPrompt, isToolError, parseWhat } from "./errors";
 import { t } from "./locale";
 import { parsePermission, permissionGuess, permissionLines, permissionPrompt } from "./permission";
-import { EMPTY_STATS, barForNow, getVibeConfig, logLineFor } from "./vibe";
+import { EMPTY_STATS, barForNow, getVibeConfig, logLineFor, pushHistory } from "./vibe";
 import { composeLive, liveFallback, liveForPrep, liveForTool, liveForWriting, liveOne, purposeFrom } from "./live";
 import type { TamacodeVibeStats } from "../types/tamacode";
 import { buildTerms, pickErrorLines } from "./terms";
@@ -833,7 +833,8 @@ export const register: Register = (on) => {
         if (e.usage) {
           const dIn = Math.max(0, sumIn(e.usage) - turnIn);
           const dOut = Math.max(0, e.usage.output_tokens - turnOut);
-          if (dIn > 0 || dOut > 0) await updateVibeStats($, (s) => ({ ...s, inputTokens: s.inputTokens + dIn, outputTokens: s.outputTokens + dOut }));
+          const at = await $.clock.now();
+          if (dIn > 0 || dOut > 0) await updateVibeStats($, (s) => ({ ...s, inputTokens: s.inputTokens + dIn, outputTokens: s.outputTokens + dOut, outHistory: pushHistory(s.outHistory, at, dOut) }));
         }
       } catch (err) {
         $.ui.log(`HUD の集計に失敗: ${String(err)}`, { to: "debug" });
@@ -888,7 +889,8 @@ export const register: Register = (on) => {
           const u = chunk.usage;
           turnIn += sumIn(u);
           turnOut += u.output_tokens;
-          await updateVibeStats($, (s) => ({ ...s, inputTokens: s.inputTokens + sumIn(u), outputTokens: s.outputTokens + u.output_tokens, turnOutputTokens: s.turnOutputTokens + u.output_tokens }));
+          const at = await $.clock.now();
+          await updateVibeStats($, (s) => ({ ...s, inputTokens: s.inputTokens + sumIn(u), outputTokens: s.outputTokens + u.output_tokens, turnOutputTokens: s.turnOutputTokens + u.output_tokens, outHistory: pushHistory(s.outHistory, at, u.output_tokens) }));
         }
         if (text !== null) {
           const wall = Date.now();
