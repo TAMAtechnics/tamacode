@@ -16,7 +16,8 @@ rsync -a \
 cp docs/販売/利用規約.md "$STAGE/tamacode/利用規約.md"
 cp docs/販売/商品説明.md "$STAGE/tamacode/はじめに.md"
 rm -f "$OUT"
-(cd "$STAGE" && zip -qr "$OLDPWD/$OUT" tamacode)
+# zip コマンドだと日本語のファイル名が Windows で化けることがあるので、macOS の ditto で作る（UTF-8 の印が付く）
+(cd "$STAGE" && ditto -c -k --sequesterRsrc --keepParent tamacode "$OLDPWD/$OUT")
 rm -rf "$STAGE"
 echo "作りました: $OUT"
 unzip -l "$OUT" | tail -1
