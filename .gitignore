@@ -17,3 +17,6 @@ package-lock.json
 
 # TAMACODE の自動バックアップ
 .tama-backup/
+
+# 販売用 zip
+dist/
