@@ -22,7 +22,7 @@
 ## インストール
 
 ```bash
-git clone https://github.com/tama11111/tamacode.git
+git clone https://github.com/TAMAtechnics/tamacode.git
 claude plugin marketplace add ./tamacode
 claude plugin install tamacode@tamacode-marketplace
 ```
